@@ -1,0 +1,22 @@
+/* Fichier : static/css/style.css */
+body { background-color: #f8f9fa; }
+.btn-custom-submit { background-color: #212529; color: #fff; border: 2px solid #212529; border-radius: 50px; padding: 0.75rem 1.8rem; font-weight: 500; transition: all 0.2s ease-in-out; width: 100%; }
+.btn-custom-secondary { background-color: transparent; color: #212529; border: 2px solid #212529; border-radius: 50px; padding: 0.75rem 1.8rem; font-weight: 500; transition: all 0.2s ease-in-out; width: 100%; }
+
+/* Style pour la liste de fichiers dans index.html */
+.option-btn-group { display: flex; gap: 0.5rem; }
+.option-btn { flex-grow: 1; transition: all 0.2s ease-in-out; background-color: #fff; border: 1px solid #dee2e6; color: #212529; padding: 0.5rem; font-size: 0.9rem; }
+.option-btn.active { background-color: #212529; color: #fff; border-color: #212529; }
+.file-info-container h6 { word-break: break-all; }
+#file-list-container .list-group-item { border-radius: 0.5rem; }
+
+/* Style pour la modale de confirmation */
+.task-card { background-color: #fff; border: 1px solid #dee2e6; border-radius: 0.5rem; padding: 1rem; margin-bottom: 1rem; }
+.task-details { display: grid; grid-template-columns: 1fr 1fr; gap: 0.75rem; font-size: 0.9rem; }
+.task-details .detail-item { display: flex; align-items: center; }
+.task-details .detail-item i { margin-right: 8px; font-size: 1.2em; }
+.file-name { word-break: break-all; }
+
+/* Overlay de chargement */
+#loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(248, 249, 250, 0.9); display: none; justify-content: center; align-items: center; flex-direction: column; z-index: 9999; text-align: center; }
+#loading-overlay .spinner-border { width: 3rem; height: 3rem; color: #212529; }
