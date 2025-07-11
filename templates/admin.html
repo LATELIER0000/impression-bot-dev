@@ -10,27 +10,45 @@
         body { background-color: #f8f9fa; }
         .login-wrapper { display: flex; align-items: center; justify-content: center; min-height: 80vh; }
         .login-card { max-width: 400px; width: 100%; }
-        .reprint-btn .spinner-border { vertical-align: middle; }
+        /* Styles pour les statuts des commandes */
+        .card.status-error { border-left: 5px solid var(--bs-danger); }
+        .card.status-pending { border-left: 5px solid var(--bs-warning); }
+        /* Style pour les groupes de boutons dans la liste de fichiers */
+        .btn-group .btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+        .reprint-btn .spinner-border {
+             /* Inutile, le JS remplace l'icône directement */
+        }
     </style>
 </head>
 <body>
     <div id="login-section" class="login-wrapper">
-        <div class="card login-card shadow-sm"><div class="card-body p-4">
-            <h1 class="card-title text-center mb-4">Espace Commerçant</h1>
-            <div id="login-error" class="alert alert-danger d-none"></div>
-            <form id="login-form">
-                <div class="mb-3"><label for="username" class="form-label">Identifiant</label><input type="text" class="form-control" id="username" name="username" required></div>
-                <div class="mb-3"><label for="password" class="form-label">Mot de passe</label><input type="password" class="form-control" id="password" name="password" required></div>
-                <div class="d-grid"><button type="submit" class="btn btn-dark">Connexion</button></div>
-            </form>
-            <div class="text-center mt-3"><a href="{{ url_for('index') }}" class="text-muted small">Retour</a></div>
-        </div></div>
+        <div class="card login-card shadow-sm">
+            <div class="card-body p-4">
+                <h1 class="card-title text-center mb-4">Espace Commerçant</h1>
+                <div id="login-error" class="alert alert-danger d-none"></div>
+                <form id="login-form">
+                    <div class="mb-3"><label for="username" class="form-label">Identifiant</label><input type="text" class="form-control" id="username" name="username" required></div>
+                    <div class="mb-3"><label for="password" class="form-label">Mot de passe</label><input type="password" class="form-control" id="password" name="password" required></div>
+                    <div class="d-grid"><button type="submit" class="btn btn-dark">Connexion</button></div>
+                </form>
+                <div class="text-center mt-3"><a href="{{ url_for('index') }}" class="text-muted small">Retour</a></div>
+            </div>
+        </div>
     </div>
+
     <div id="admin-panel" class="d-none">
         <nav class="navbar navbar-expand-lg navbar-dark bg-dark sticky-top">
             <div class="container">
                 <a class="navbar-brand" href="#"><i class="bi bi-shield-check"></i> Panneau Admin</a>
                 <div class="ms-auto d-flex align-items-center">
+                    <!-- NOUVEAU: Bouton pour tout effacer -->
+                    <button id="delete-all-btn" class="btn btn-outline-danger btn-sm me-3" title="Effacer tout l'historique">
+                        <i class="bi bi-trash3-fill"></i> Tout effacer
+                    </button>
                     <button id="refresh-btn" class="btn btn-outline-secondary btn-sm me-3" title="Rafraîchir"><i class="bi bi-arrow-clockwise"></i></button>
                     <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm"><i class="bi bi-box-arrow-right"></i> Déconnexion</a>
                 </div>
@@ -38,23 +56,37 @@
         </nav>
         <div class="container mt-4">
             <div class="row mb-4">
-                <div class="col-md-6 mb-3 mb-md-0"><div class="card text-center h-100"><div class="card-body">
-                    <h5 class="card-title text-success">Revenu Total</h5><p id="total-revenue-display" class="card-text fs-2 fw-bold">0.00 €</p>
-                </div></div></div>
-                <div class="col-md-6"><div class="card text-center h-100"><div class="card-body">
-                    <h5 class="card-title text-primary">Pages Imprimées</h5><p id="total-pages-display" class="card-text fs-2 fw-bold">0</p>
-                </div></div></div>
+                <div class="col-md-6 mb-3 mb-md-0">
+                    <div class="card text-center h-100">
+                        <div class="card-body">
+                            <h5 class="card-title text-success">Revenu Total</h5>
+                            <p id="total-revenue-display" class="card-text fs-2 fw-bold">0.00 €</p>
+                        </div>
+                    </div>
+                </div>
+                <div class="col-md-6">
+                    <div class="card text-center h-100">
+                        <div class="card-body">
+                            <h5 class="card-title text-primary">Pages Imprimées</h5>
+                            <p id="total-pages-display" class="card-text fs-2 fw-bold">0</p>
+                        </div>
+                    </div>
+                </div>
             </div>
             <h2 class="mb-3">Historique des Commandes</h2>
             <div id="commands-container"></div>
         </div>
     </div>
+
     <div class="toast-container position-fixed bottom-0 end-0 p-3">
-      <div id="reprintToast" class="toast align-items-center text-bg-success border-0"><div class="d-flex">
-          <div class="toast-body">Réimpression lancée.</div>
-          <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
-      </div></div>
+      <div id="reprintToast" class="toast align-items-center text-bg-success border-0">
+          <div class="d-flex">
+              <div class="toast-body">Réimpression lancée. Le statut sera mis à jour.</div>
+              <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast"></button>
+          </div>
+      </div>
     </div>
+
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
     <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
     <script>const isUserLoggedIn = {{ is_logged_in|tojson }};</script>
