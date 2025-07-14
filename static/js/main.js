@@ -6,12 +6,28 @@ document.addEventListener('DOMContentLoaded', function() {
     const clientNameInput = document.getElementById('client_name');
     const summaryButton = document.getElementById('summary-button');
     const modalPrintForm = document.getElementById('modal-print-form');
-    const confirmModalEl = document.getElementById('confirmModal');
     const fileOptionsArea = document.getElementById('file-options-area');
+    const toastContainer = document.getElementById('toast-container');
 
     let fileStore = [];
     let currentJobId = null;
     let pollingInterval = null;
+
+    function showToast(message, type = 'danger') {
+        const toastId = `toast-${Date.now()}`;
+        const toastHTML = `
+            <div id="${toastId}" class="toast align-items-center text-bg-${type} border-0" role="alert" aria-live="assertive" aria-atomic="true">
+              <div class="d-flex">
+                <div class="toast-body">${message}</div>
+                <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Close"></button>
+              </div>
+            </div>`;
+        toastContainer.innerHTML += toastHTML;
+        const toastEl = document.getElementById(toastId);
+        const toast = new bootstrap.Toast(toastEl);
+        toast.show();
+        toastEl.addEventListener('hidden.bs.toast', () => toastEl.remove());
+    }
 
     function formatBytes(bytes, d = 2) {
         if (!bytes || bytes === 0) return '0 B';
@@ -25,7 +41,7 @@ document.addEventListener('DOMContentLoaded', function() {
 
     fileInput.addEventListener('change', () => {
         if (!clientNameInput.value.trim()) {
-            alert("Veuillez d'abord renseigner votre nom.");
+            showToast("Veuillez d'abord renseigner votre nom.", "warning");
             fileInput.value = '';
             return;
         }
@@ -42,14 +58,7 @@ document.addEventListener('DOMContentLoaded', function() {
             if (fileStore.some(f => f.file.name === file.name && f.file.size === file.size)) return;
 
             const taskId = `task-${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
-            const fileEntry = {
-                id: taskId,
-                file: file,
-                status: 'queued',
-                serverStatus: null,
-                serverData: null,
-                error: null
-            };
+            const fileEntry = { id: taskId, file: file, status: 'queued', serverStatus: null, serverData: null, error: null };
             fileStore.push(fileEntry);
             addFileToListDOM(fileEntry, fileStore.length - 1);
         });
@@ -68,21 +77,14 @@ document.addEventListener('DOMContentLoaded', function() {
         fileRow.querySelector('.file-name-placeholder').textContent = file.name;
         fileRow.querySelector('.file-details-placeholder').innerHTML = `<i class="bi bi-file-earmark-binary"></i> ${file.type || 'Fichier'} <span class="mx-2">|</span> <i class="bi bi-hdd"></i> ${formatBytes(file.size)}`;
 
-        fileRow.querySelector('.file-options-placeholder').innerHTML = `
-            <form>
-                <div class="d-flex flex-column flex-sm-row justify-content-around align-items-center gap-3">
-                    <div class="d-flex align-items-center gap-2"><label class="form-label mb-0 small">Copies:</label><input type="number" name="copies" class="form-control form-control-sm" value="1" min="1" style="width: 70px;"></div>
-                    <div class="w-100"><input type="hidden" name="color" value="bw"><div class="option-btn-group" data-group-name="color"><button type="button" class="btn option-btn active" data-value="bw">N&B</button><button type="button" class="btn option-btn" data-value="color">Couleur</button></div></div>
-                </div>
-                <div class="mt-2 text-center"><a class="small text-decoration-none" data-bs-toggle="collapse" href="#advanced-options-${index}"><i class="bi bi-gear"></i> Options avancées</a></div>
-                <div class="collapse mt-2" id="advanced-options-${index}">
-                    <div class="p-2 bg-light rounded">
-                        <div class="mb-3"><label class="form-label small">Format</label><select name="papersize" class="form-select form-select-sm"><option value="2" selected>A4</option><option value="1">A3</option><option value="3">A5</option></select></div>
-                        <div class="mb-3"><label class="form-label small">Impression</label><input type="hidden" name="siding" value="recto"><div class="option-btn-group" data-group-name="siding"><button type="button" class="btn option-btn active" data-value="recto">Recto</button><button type="button" class="btn option-btn" data-value="recto_verso">R/V</button></div></div>
-                        <div><label class="form-label small">Plage</label><input type="hidden" name="pagemode" value="all"><div class="option-btn-group" data-group-name="pagemode"><button type="button" class="btn option-btn active" data-value="all">Tout</button><button type="button" class="btn option-btn" data-value="range">Plage</button></div><div class="d-flex align-items-center gap-2 mt-2 page-range-inputs d-none"><input type="number" name="startpage" class="form-control form-control-sm" placeholder="Début" min="1"><span class="text-muted">-</span><input type="number" name="endpage" class="form-control form-control-sm" placeholder="Fin" min="1"></div></div>
-                    </div>
-                </div>
-            </form>`;
+        const collapseLink = fileRow.querySelector('[data-bs-toggle="collapse"]');
+        const collapseTarget = fileRow.querySelector('.collapse');
+
+        if (collapseLink && collapseTarget) {
+            const collapseId = `advanced-options-${index}`;
+            collapseLink.href = `#${collapseId}`;
+            collapseTarget.id = collapseId;
+        }
 
         fileListContainer.appendChild(fileRow);
     }
@@ -93,8 +95,7 @@ document.addEventListener('DOMContentLoaded', function() {
             fileEntry.status = 'uploading';
             updateFileStatusUI(fileEntry.id, 'uploading');
 
-            const fileRow = fileListContainer.querySelector(`li[data-task-id="${fileEntry.id}"]`);
-            const formData = new FormData(fileRow.querySelector('form'));
+            const formData = new FormData();
             formData.append('file', fileEntry.file);
             formData.append('client_name', clientNameInput.value);
             formData.append('job_id', currentJobId);
@@ -159,7 +160,7 @@ document.addEventListener('DOMContentLoaded', function() {
     function updateSummaryButton() {
         if (fileStore.length === 0) {
             summaryButton.disabled = true;
-            summaryButton.textContent = 'Suivant'; // Texte par défaut
+            summaryButton.textContent = 'Suivant';
             return;
         }
 
@@ -169,10 +170,10 @@ document.addEventListener('DOMContentLoaded', function() {
 
         if (isProcessing) {
             summaryButton.disabled = true;
-            summaryButton.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Traitement en cours...`;
+            summaryButton.innerHTML = `<span class="spinner-border spinner-border-sm"></span> Traitement...`;
         } else if (hasReadyFiles) {
             summaryButton.disabled = false;
-            summaryButton.textContent = 'Suivant'; // CORRECTION: Texte changé
+            summaryButton.textContent = 'Calculer le total';
         } else {
             summaryButton.disabled = true;
             summaryButton.textContent = 'Aucun fichier valide';
@@ -197,7 +198,7 @@ document.addEventListener('DOMContentLoaded', function() {
             case 'error':
             case 'ERREUR_CONVERSION':
             case 'ERREUR_PAGE_COUNT':
-                const errorMsg = typeof data === 'string' ? data : status.replace(/_/g, ' ');
+                const errorMsg = typeof data === 'string' ? data : (status.replace(/_/g, ' '));
                 statusHTML = `<span class="text-danger">❌ ${errorMsg}</span>`; break;
             case 'PRET_POUR_CALCUL':
                 statusHTML = `<span class="text-success">✅ Prêt</span>`; break;
@@ -225,19 +226,21 @@ document.addEventListener('DOMContentLoaded', function() {
             return;
         }
 
+        // CORRECTION: La logique est maintenant basée sur l'élément <li> parent au lieu d'un <form> inexistant.
         const optionBtn = e.target.closest('.option-btn');
         if (optionBtn) {
-            const form = optionBtn.closest('form');
+            const li = optionBtn.closest('li');
             const group = optionBtn.closest('.option-btn-group');
             const groupName = group.dataset.groupName;
             const value = optionBtn.dataset.value;
-            form.querySelector(`input[name="${groupName}"]`).value = value;
+
+            li.querySelector(`input[name="${groupName}"]`).value = value;
             group.querySelectorAll('.option-btn').forEach(btn => btn.classList.remove('active'));
             optionBtn.classList.add('active');
+
             if (groupName === 'pagemode') {
-                const rangeInputs = group.nextElementSibling;
-                if (value === 'range') rangeInputs.classList.remove('d-none');
-                else rangeInputs.classList.add('d-none');
+                const rangeInputs = li.querySelector('.page-range-inputs');
+                rangeInputs.classList.toggle('d-none', value !== 'range');
             }
         }
     });
@@ -246,14 +249,18 @@ document.addEventListener('DOMContentLoaded', function() {
         const tasksPayload = fileStore
             .filter(f => f.serverStatus === 'PRET_POUR_CALCUL')
             .map(f => {
-                const formElement = fileListContainer.querySelector(`li[data-task-id="${f.id}"] form`);
-                const formData = new FormData(formElement);
-                const options = Object.fromEntries(formData.entries());
+                // CORRECTION: On récupère les champs depuis le <li> de la tâche, sans utiliser FormData.
+                const taskRow = fileListContainer.querySelector(`li[data-task-id="${f.id}"]`);
+                const options = {};
+                const inputs = taskRow.querySelectorAll('[name]');
+                inputs.forEach(input => {
+                    options[input.name] = input.value;
+                });
                 return { task_id: f.id, options: options };
             });
 
         if (tasksPayload.length === 0) {
-            alert("Aucun fichier n'est prêt à être imprimé.");
+            showToast("Aucun fichier n'est prêt à être imprimé.", "warning");
             return;
         }
 
@@ -268,7 +275,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 const hasFailedFiles = fileStore.some(f => f.serverStatus?.includes('ERREUR'));
                 showConfirmationModal(data.print_job_summary, hasFailedFiles);
             } else {
-                alert(data.error || "Impossible de calculer le résumé.");
+                showToast(data.error || "Impossible de calculer le résumé.");
             }
         });
     });
@@ -302,17 +309,29 @@ document.addEventListener('DOMContentLoaded', function() {
         fetch('/print', { method: 'POST' })
         .then(res => res.json())
         .then(data => {
+            document.getElementById('loading-overlay').style.display = 'none';
             if (data.success) {
-                setTimeout(() => { window.location.href = '/?success_message=Impression+lancée+avec+succès+!'; }, 3000);
+                window.location.href = '/?success_message=Impression+lancée+avec+succès+!';
             } else {
-                document.getElementById('loading-overlay').style.display = 'none';
-                alert(data.error || "Une erreur s'est produite lors du lancement de l'impression.");
+                showToast(data.error || "Une erreur s'est produite lors du lancement de l'impression.");
             }
         })
         .catch(err => {
             console.error(err);
             document.getElementById('loading-overlay').style.display = 'none';
-            alert("Erreur de communication avec le serveur.");
+            showToast("Erreur de communication avec le serveur.");
         });
     });
+
+    const urlParams = new URLSearchParams(window.location.search);
+    const successMessage = urlParams.get('success_message');
+    const errorMessage = urlParams.get('error_message');
+    if (successMessage) {
+        showToast(successMessage, 'success');
+        window.history.replaceState({}, document.title, "/");
+    }
+    if (errorMessage) {
+        showToast(errorMessage, 'danger');
+        window.history.replaceState({}, document.title, "/");
+    }
 });

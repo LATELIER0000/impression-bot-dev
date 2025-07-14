@@ -1,4 +1,4 @@
-// static/js/admin.js
+// static/js/admin.js (version corrigée)
 document.addEventListener('DOMContentLoaded', function() {
     const loginSection = document.getElementById('login-section');
     const adminPanel = document.getElementById('admin-panel');
@@ -7,58 +7,51 @@ document.addEventListener('DOMContentLoaded', function() {
 
     let refreshInterval;
 
-    // --- Logique du Panneau Admin (sera initialisée après connexion) ---
     function initializeAdminPanel() {
         const refreshBtn = document.getElementById('refresh-btn');
         const deleteAllBtn = document.getElementById('delete-all-btn');
         const commandsContainer = document.getElementById('commands-container');
-        const reprintToast = new bootstrap.Toast(document.getElementById('reprintToast'));
+        const reprintToastEl = document.getElementById('reprintToast');
+        const reprintToast = reprintToastEl ? new bootstrap.Toast(reprintToastEl) : null;
 
         const fetchAdminData = () => {
-            const openCollapses = new Set();
-            commandsContainer.querySelectorAll('.collapse.show').forEach(el => {
-                openCollapses.add(el.id);
-            });
+            const openCollapses = new Set(Array.from(commandsContainer.querySelectorAll('.collapse.show')).map(el => el.id));
 
             fetch('/api/admin_data')
-                .then(res => res.ok ? res.json() : Promise.reject(res))
+                .then(res => {
+                    if (res.status === 401 || res.status === 403) window.location.reload();
+                    if (!res.ok) throw new Error(`HTTP error! status: ${res.status}`);
+                    return res.json();
+                })
                 .then(data => {
-                    if (data.error) {
-                        console.error('API Error:', data.error);
-                        if (data.error === 'Non autorisé') window.location.reload();
-                        return;
-                    }
+                    if (data.error) throw new Error(data.error);
+
                     document.getElementById('total-revenue-display').textContent = `${data.total_revenue} €`;
                     document.getElementById('total-pages-display').textContent = data.total_pages;
 
                     commandsContainer.innerHTML = '';
+                    deleteAllBtn.disabled = !data.commands || data.commands.length === 0;
                     if (!data.commands || data.commands.length === 0) {
                         commandsContainer.innerHTML = '<p class="text-center text-muted">Aucune commande dans l\'historique.</p>';
-                        deleteAllBtn.disabled = true;
                         return;
                     }
-                    deleteAllBtn.disabled = false;
 
                     data.commands.forEach((command, index) => {
-                        const collapseId = `command-details-${index}`;
-                        const isOpen = openCollapses.has(collapseId);
-                        const showClass = isOpen ? 'show' : '';
+                        const collapseId = `command-details-${command.job_id}`;
+                        const showClass = openCollapses.has(collapseId) ? 'show' : '';
 
-                        let filesHTML = '';
-                        command.files.forEach(file => {
-                            let statusBadge = '';
+                        const filesHTML = command.files.map(file => {
+                            let statusBadge;
                             const status = file.status || 'INCONNU';
                             if (status.includes('ERREUR')) statusBadge = `<span class="badge bg-danger">${status.replace(/_/g, ' ')}</span>`;
                             else if (status === 'IMPRIME_AVEC_SUCCES') statusBadge = `<span class="badge bg-success">Imprimé</span>`;
                             else if (status === 'IMPRESSION_EN_COURS') statusBadge = `<span class="badge bg-info text-dark">Impression...</span>`;
                             else statusBadge = `<span class="badge bg-secondary">${status.replace(/_/g, ' ')}</span>`;
 
-                            const isColor = file.color === 'Couleur';
-                            const isDuplex = file.duplex === 'Recto-Verso';
-                            const priceDisplay = file.price ? `<small class="text-muted">(${parseFloat(file.price).toFixed(2)}€)</small>` : '';
+                            const priceDisplay = file.price ? `<small class="text-muted">(${(+file.price).toFixed(2)}€)</small>` : '';
                             const downloadLink = file.task_id ? `<a href="/download/${file.task_id}" target="_blank" class="text-decoration-none">${file.file_name}</a>` : file.file_name;
 
-                            filesHTML += `
+                            return `
                                 <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap">
                                     <div class="me-auto" style="word-break: break-all; padding-right: 1rem;">
                                         ${downloadLink} ${priceDisplay}
@@ -66,21 +59,21 @@ document.addEventListener('DOMContentLoaded', function() {
                                     </div>
                                     <div class="btn-group mt-1 mt-sm-0" role="group">
                                         <button class="btn btn-sm btn-outline-secondary reprint-btn" title="Réimprimer"
-                                            data-task-id="${file.task_id}" data-is-color="${isColor}" data-is-duplex="${isDuplex}" data-paper-size="${file.paper_size}"
-                                            ${status.includes('ERREUR') || !file.task_id ? 'disabled' : ''}>
+                                            data-task-id="${file.task_id}" data-is-color="${file.color === 'Couleur'}"
+                                            data-is-duplex="${file.duplex === 'Recto-Verso'}" data-paper-size="${file.paper_size}"
+                                            ${status === 'ERREUR_CONVERSION' || !file.task_id ? 'disabled' : ''}>
                                             <i class="bi bi-printer"></i>
                                         </button>
-                                        <button class="btn btn-sm btn-outline-danger delete-task-btn" title="Supprimer cette tâche"
-                                            data-task-id="${file.task_id}"
-                                            data-filename="${file.file_name}"
-                                            ${!file.task_id ? 'disabled' : ''}>
+                                        <button class="btn btn-sm btn-outline-danger delete-task-btn" title="Supprimer tâche"
+                                            data-task-id="${file.task_id}" data-filename="${file.file_name}" ${!file.task_id ? 'disabled' : ''}>
                                             <i class="bi bi-x-lg"></i>
                                         </button>
                                     </div>
                                 </li>`;
-                        });
+                        }).join('');
+
                         const cardStatusClass = command.job_status === 'error' ? 'status-error' : (command.job_status === 'pending' ? 'status-pending' : '');
-                        const cardHTML = `
+                        commandsContainer.innerHTML += `
                             <div class="card shadow-sm mb-3 ${cardStatusClass}">
                                 <div class="card-body">
                                     <a href="#" class="text-decoration-none text-dark" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
@@ -92,71 +85,63 @@ document.addEventListener('DOMContentLoaded', function() {
                                     <div class="collapse ${showClass}" id="${collapseId}"><hr><ul class="list-group list-group-flush">${filesHTML}</ul></div>
                                 </div>
                             </div>`;
-                        commandsContainer.innerHTML += cardHTML;
                     });
                 })
                 .catch(error => {
                     console.error('Erreur lors de la récupération des données admin:', error);
-                    commandsContainer.innerHTML = '<div class="alert alert-danger">Impossible de charger l\'historique.</div>';
+                    commandsContainer.innerHTML = '<div class="alert alert-danger">Impossible de charger l\'historique. Le serveur est peut-être inaccessible.</div>';
                 });
         };
 
         refreshBtn.addEventListener('click', fetchAdminData);
+
         deleteAllBtn.addEventListener('click', () => {
-             if (confirm("ATTENTION !\n\nÊtes-vous absolument sûr de vouloir effacer TOUT l'historique des commandes ?\n\nCETTE ACTION EST DÉFINITIVE ET IRRÉVERSIBLE.")) {
-                fetch('/api/delete_all_tasks', { method: 'POST' })
-                    .then(res => res.json())
-                    .then(data => {
-                        if (data.success) {
-                            fetchAdminData();
-                        } else {
-                            alert(`Erreur: ${data.error || "Impossible de vider l'historique."}`);
-                        }
-                    });
+             if (confirm("ATTENTION !\n\nÊtes-vous sûr de vouloir effacer TOUT l'historique ?\n\nCETTE ACTION EST IRRÉVERSIBLE.")) {
+                fetch('/api/delete_all_tasks', { method: 'POST' }).then(res => res.json()).then(data => {
+                    if (data.success) fetchAdminData(); else alert(`Erreur: ${data.error}`);
+                });
             }
         });
 
         commandsContainer.addEventListener('click', (event) => {
             const reprintButton = event.target.closest('.reprint-btn');
-            const deleteTaskButton = event.target.closest('.delete-task-btn');
-
             if (reprintButton) {
                 reprintButton.disabled = true;
                 reprintButton.innerHTML = `<span class="spinner-border spinner-border-sm"></span>`;
-                const data = { task_id: reprintButton.dataset.taskId, is_color: reprintButton.dataset.isColor === 'true', is_duplex: reprintButton.dataset.isDuplex === 'true', paper_size: reprintButton.dataset.paperSize || '2' };
+                const data = {
+                    task_id: reprintButton.dataset.taskId,
+                    is_color: reprintButton.dataset.isColor === 'true',
+                    is_duplex: reprintButton.dataset.isDuplex === 'true',
+                    paper_size: reprintButton.dataset.paperSize || '2'
+                };
                 fetch('/reprint', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(data) })
                     .then(res => res.json()).then(result => {
-                        if (result.success) {
-                            reprintToast.show();
-                        } else {
-                            alert(`Erreur: ${result.error || "Erreur inconnue"}`);
-                        }
+                        if (result.success && reprintToast) reprintToast.show();
+                        else alert(`Erreur: ${result.error}`);
+                    }).finally(() => {
+                        setTimeout(() => {
+                            reprintButton.disabled = false;
+                            reprintButton.innerHTML = `<i class="bi bi-printer"></i>`;
+                        }, 3000);
                     });
                 return;
             }
 
+            const deleteTaskButton = event.target.closest('.delete-task-btn');
             if (deleteTaskButton) {
                 const { taskId, filename } = deleteTaskButton.dataset;
-                if (confirm(`Êtes-vous sûr de vouloir supprimer la tâche pour "${filename}" ?`)) {
+                if (confirm(`Supprimer la tâche pour "${filename}" ?`)) {
                     fetch(`/api/delete_task/${taskId}`, { method: 'POST' })
                         .then(res => res.json()).then(data => {
-                            if (data.success) {
-                                fetchAdminData();
-                            } else {
-                                alert(`Erreur: ${data.error || "Impossible de supprimer la tâche."}`);
-                            }
+                            if (data.success) fetchAdminData(); else alert(`Erreur: ${data.error}`);
                         });
                 }
             }
         });
 
         document.addEventListener("visibilitychange", () => {
-            if (document.hidden) {
-                clearInterval(refreshInterval);
-            } else {
-                fetchAdminData();
-                refreshInterval = setInterval(fetchAdminData, 5000);
-            }
+            if (document.hidden) clearInterval(refreshInterval);
+            else { fetchAdminData(); refreshInterval = setInterval(fetchAdminData, 5000); }
         });
 
         fetchAdminData();
@@ -190,6 +175,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
     }
 
+    // `isUserLoggedIn` est défini dans le template admin.html
     if (typeof isUserLoggedIn !== 'undefined' && isUserLoggedIn) {
         showAdminPanel();
     }
