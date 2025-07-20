@@ -30,9 +30,18 @@ class Config:
     PRIX_NOIR_BLANC = 0.20
     PRIX_COULEUR = 0.70
 
+    # --- Configuration de la boîte mail ---
+    EMAIL_IMAP_SERVER = 'imap.gmail.com'
+    EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS') or 'latelier0000@gmail.com'
+    EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD') or 'tiwt ipas vtad hbib'
+    # MODIFIÉ : Intervalle réduit à 10 secondes
+    EMAIL_CHECK_INTERVAL = 10
+    EMAIL_PROCESSED_MAILBOX = 'Traités' # Nom du dossier où déplacer les emails traités
+
     # --- Chemins des fichiers et dossiers ---
     UPLOAD_FOLDER = os.path.join(basedir, 'uploads')
     CONVERTED_FOLDER = os.path.join(UPLOAD_FOLDER, 'converted')
+    EMAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'emails') # Dossier pour les pièces jointes
     DATABASE_FILE = os.path.join(basedir, 'history.db')
 
     # --- Dépendances externes ---

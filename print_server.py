@@ -2,17 +2,14 @@
 import os
 import time
 import sys
-import subprocess
 import shutil
 from datetime import datetime, timedelta
-import pathlib
 from collections import OrderedDict
 import threading
 import uuid
-import sqlite3
 import logging
 import traceback
-from multiprocessing import Process, Queue
+from multiprocessing import Process
 
 import click
 from selenium import webdriver
@@ -22,36 +19,28 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, send_from_directory, g
-from PyPDF2 import PdfReader, errors as PyPDF2Errors
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 
 from config import Config
+from core import (
+    db_insert_task, db_update_task, process_single_file_background,
+    get_db_connection as core_get_db_connection,
+    ALLOWED_EXTENSIONS, STATUS
+)
+from email_processor import check_emails_periodically
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 app.config.from_object(Config)
 
-STATUS = {
-    'UPLOADING': 'TELECHARGEMENT_EN_COURS', 'QUEUED': 'EN_ATTENTE_TRAITEMENT',
-    'CONVERTING': 'CONVERSION_EN_COURS', 'COUNTING': 'COMPTAGE_PAGES',
-    'ERROR_FILE_EMPTY': 'ERREUR_FICHIER_VIDE',
-    'ERROR_CONVERSION': 'ERREUR_CONVERSION',
-    'ERROR_PAGE_COUNT': 'ERREUR_COMPTAGE_PAGES',
-    'ERROR_FATAL_READ': 'ERREUR_LECTURE_FATALE',
-    'READY': 'PRET_POUR_CALCUL',
-    'READY_NO_PAGE_COUNT': 'PRET_SANS_COMPTAGE',
-    'PRINTING': 'IMPRESSION_EN_COURS',
-    'PRINT_SUCCESS': 'IMPRIME_AVEC_SUCCES',
-    'PRINT_SUCCESS_NO_COUNT': 'IMPRIME_SANS_COMPTAGE',
-    'PRINT_FAILED': 'ERREUR_IMPRESSION'
-}
-ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods'}
-
+# NOUVEAU : Ajout du "cache buster" dans le contexte des templates
+@app.context_processor
+def inject_cache_buster():
+    return dict(cache_buster=int(time.time()))
 
 def get_db_connection():
-    conn = sqlite3.connect(app.config['DATABASE_FILE'], timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return core_get_db_connection(app.config['DATABASE_FILE'])
 
 def init_db():
     with get_db_connection() as conn:
@@ -60,24 +49,6 @@ def init_db():
         conn.commit()
     logging.info("Base de données initialisée avec le schéma.")
 
-def db_update_task(task_id, data):
-    with get_db_connection() as conn:
-        fields = ', '.join([f'{key} = ?' for key in data.keys()])
-        values = list(data.values()) + [task_id]
-        query = f"UPDATE history SET {fields} WHERE task_id = ?"
-        conn.execute(query, tuple(values))
-        conn.commit()
-
-def db_insert_task(data):
-    with get_db_connection() as conn:
-        columns = ['job_id', 'task_id', 'timestamp', 'client_name', 'file_name', 'secure_filename', 'status', 'pages', 'copies', 'color', 'duplex', 'price', 'paper_size', 'page_mode', 'start_page', 'end_page']
-        query_cols = ', '.join(columns)
-        placeholders = ', '.join(['?'] * len(columns))
-        values = [data.get(col) for col in columns]
-        query = f"INSERT INTO history ({query_cols}) VALUES ({placeholders})"
-        conn.execute(query, tuple(values))
-        conn.commit()
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -85,59 +56,6 @@ def generate_unique_filename(filename):
     timestamp = int(time.time())
     original_secure_name = secure_filename(filename)
     return f"{timestamp}_{uuid.uuid4().hex[:8]}_{original_secure_name}"
-
-def count_pages(filepath):
-    try:
-        with open(filepath, 'rb') as f:
-            reader = PdfReader(f)
-            if reader.is_encrypted:
-                logging.warning(f"Le fichier PDF {filepath} est chiffré.")
-            return len(reader.pages) if reader.pages else 0
-    except PyPDF2Errors.PdfReadError as e:
-        logging.error(f"Erreur de lecture PDF (PyPDF2) pour {filepath}: {e}")
-        return 0
-    except Exception as e:
-        logging.error(f"Erreur générique lors du comptage des pages pour {filepath}: {e}")
-        return 0
-
-def count_pages_worker(filepath, result_queue):
-    try:
-        page_count = count_pages(filepath)
-        result_queue.put(page_count)
-    except Exception as e:
-        logging.error(f"Erreur inattendue dans le worker count_pages pour {filepath}: {e}")
-        result_queue.put(-1)
-
-def convert_to_pdf(source_path, secure_filename):
-    pdf_filename = f"{os.path.splitext(secure_filename)[0]}.pdf"
-    pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
-    if source_path.lower().endswith('.pdf'):
-        shutil.copy(source_path, pdf_path)
-        return pdf_path
-    lo_command = app.config['LIBREOFFICE_PATH']
-    if not lo_command or not os.path.exists(lo_command):
-        logging.error(f"Chemin de LibreOffice non configuré ou invalide: {lo_command}")
-        return None
-    user_profile_path = os.path.join(os.getcwd(), 'lo_profile', str(time.time_ns()))
-    os.makedirs(user_profile_path, exist_ok=True)
-    user_profile_url = pathlib.Path(user_profile_path).as_uri()
-    try:
-        command = [lo_command, f'-env:UserInstallation={user_profile_url}', '--headless', '--convert-to', 'pdf:writer_pdf_Export', '--outdir', app.config['CONVERTED_FOLDER'], source_path]
-        subprocess.run(command, check=True, timeout=120)
-        timeout = 20
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-                time.sleep(1)
-                return pdf_path
-            time.sleep(0.5)
-        logging.error(f"La conversion a réussi mais le fichier PDF n'a pas été trouvé à temps: {pdf_path}")
-        return None
-    except Exception as e:
-        logging.error(f"Erreur de conversion LibreOffice: {e}")
-        return None
-    finally:
-        shutil.rmtree(user_profile_path, ignore_errors=True)
 
 def _run_print_job(job):
     options = webdriver.ChromeOptions()
@@ -149,7 +67,7 @@ def _run_print_job(job):
         wait = WebDriverWait(driver, 60)
         for i, task in enumerate(job['tasks']):
             logging.info(f"Impression de la tâche {task['task_id']}...")
-            db_update_task(task['task_id'], {'status': STATUS['PRINTING']})
+            db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': STATUS['PRINTING']})
             driver.get(app.config['URL_PDF_PRINT'])
             wait.until(EC.presence_of_element_located((By.XPATH, "//input[contains(@value, \"Démarrer l'impression\")]")))
             Select(driver.find_element(By.CSS_SELECTOR, "select[name='ColorMode']")).select_by_value("0" if task['is_color'] else "1")
@@ -175,7 +93,7 @@ def _run_print_job(job):
             logging.info(f"Tâche {task['task_id']} envoyée à l'imprimante avec succès.")
 
             final_success_status = STATUS['PRINT_SUCCESS_NO_COUNT'] if task.get('pages', 0) == 0 else STATUS['PRINT_SUCCESS']
-            db_update_task(task['task_id'], {'status': final_success_status})
+            db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': final_success_status})
 
             if i < len(job['tasks']) - 1: driver.find_element(By.XPATH, return_button_xpath).click()
         return True
@@ -183,53 +101,10 @@ def _run_print_job(job):
         logging.error(f"ERREUR CRITIQUE DANS SELENIUM: {traceback.format_exc()}")
         if driver: driver.save_screenshot(f"selenium_error_{int(time.time())}.png")
         for task_to_fail in job['tasks']:
-            db_update_task(task_to_fail['task_id'], {'status': STATUS['PRINT_FAILED']})
+            db_update_task(app.config['DATABASE_FILE'], task_to_fail['task_id'], {'status': STATUS['PRINT_FAILED']})
         return False
     finally:
         if driver: driver.quit()
-
-def _process_single_file_background(task_info):
-    task_id = task_info['task_id']; original_filepath = task_info['original_path']; secure_filename = task_info['secure_filename']
-
-    db_update_task(task_id, {'status': STATUS['CONVERTING'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-    final_pdf_path = convert_to_pdf(original_filepath, secure_filename)
-    if not final_pdf_path:
-        logging.error(f"Échec de conversion pour {secure_filename}")
-        db_update_task(task_id, {'status': STATUS['ERROR_CONVERSION']}); return
-
-    db_update_task(task_id, {'status': STATUS['COUNTING']})
-
-    result_queue = Queue()
-    process = Process(target=count_pages_worker, args=(final_pdf_path, result_queue))
-    process.start()
-    process.join(timeout=15)
-
-    if process.is_alive():
-        process.terminate()
-        process.join()
-        logging.error(f"Le comptage des pages pour {final_pdf_path} a dépassé le timeout. Crash probable.")
-        db_update_task(task_id, {'status': STATUS['ERROR_FATAL_READ'], 'pages': 0})
-        return
-
-    if process.exitcode != 0:
-        logging.error(f"Le processus de comptage a crashé pour {final_pdf_path} (exit code: {process.exitcode}).")
-        db_update_task(task_id, {'status': STATUS['ERROR_FATAL_READ'], 'pages': 0})
-        return
-
-    try:
-        pages = result_queue.get_nowait()
-    except Exception:
-        logging.error(f"Impossible de récupérer le résultat du processus de comptage pour {final_pdf_path}.")
-        db_update_task(task_id, {'status': STATUS['ERROR_FATAL_READ'], 'pages': 0})
-        return
-
-    if pages > 0:
-        db_update_task(task_id, {'pages': pages, 'status': STATUS['READY']})
-        logging.info(f"Fichier {secure_filename} prêt pour calcul ({pages} pages).")
-    else:
-        logging.warning(f"Échec du comptage de pages pour {final_pdf_path}. Passage en mode 'Prêt sans comptage'.")
-        db_update_task(task_id, {'pages': 0, 'status': STATUS['READY_NO_PAGE_COUNT']})
-
 
 @app.route('/')
 def index():
@@ -249,23 +124,23 @@ def upload_and_process_file():
         file_size = os.path.getsize(filepath)
         if file_size == 0:
             logging.error(f"Fichier téléversé '{file.filename}' est vide (0 octet). Abandon.")
-            task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['ERROR_FILE_EMPTY']}
-            db_insert_task(task_data)
+            task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['ERROR_FILE_EMPTY'], 'source': 'upload', 'original_path': filepath}
+            db_insert_task(app.config['DATABASE_FILE'], task_data)
             os.remove(filepath)
             return jsonify({'success': True, 'task_id': task_data['task_id']})
     except OSError as e:
         logging.error(f"Impossible d'accéder au fichier ou de lire sa taille: {e}")
         return jsonify({'success': False, 'error': "Erreur serveur à la lecture du fichier."}), 500
 
-    task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['QUEUED']}
-    db_insert_task(task_data)
+    task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['QUEUED'], 'source': 'upload', 'original_path': filepath}
+    db_insert_task(app.config['DATABASE_FILE'], task_data)
 
     thread_args = {
         'task_id': task_data['task_id'],
         'original_path': filepath,
         'secure_filename': unique_filename
     }
-    thread = threading.Thread(target=_process_single_file_background, args=(thread_args,)); thread.start()
+    thread = threading.Thread(target=process_single_file_background, args=(thread_args, app.config)); thread.start()
 
     return jsonify({'success': True, 'task_id': task_data['task_id']})
 
@@ -286,7 +161,7 @@ def get_job_status(job_id):
                 if now - task_time > timedelta(seconds=timeout_seconds):
                     logging.warning(f"Tâche {task['task_id']} ({task['file_name']}) a dépassé le temps limite. Passage en erreur.")
                     error_status = STATUS['ERROR_CONVERSION']
-                    db_update_task(task['task_id'], {'status': error_status})
+                    db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': error_status})
                     task['status'] = error_status
             except (ValueError, TypeError):
                 continue
@@ -340,7 +215,7 @@ def calculate_summary():
             page_mode = 'all'; start_page = None; end_page = None
 
         update_data = {'copies': copies, 'color': 'Couleur' if is_color else 'N&B', 'duplex': 'Recto-Verso' if is_duplex else 'Recto', 'price': f"{prix_tache:.2f}" if pages > 0 else "0.00", 'paper_size': options.get('papersize', '2'), 'page_mode': page_mode, 'start_page': start_page, 'end_page': end_page}
-        db_update_task(task_id, update_data)
+        db_update_task(app.config['DATABASE_FILE'], task_id, update_data)
 
         pdf_filename = f"{os.path.splitext(original_task_data['secure_filename'])[0]}.pdf"
         final_pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
@@ -370,12 +245,19 @@ def download_file(task_id):
     if not session.get('is_admin'): return "Accès non autorisé", 403
     task_info = get_task_from_db(task_id)
     if not task_info: return "Tâche introuvable.", 404
-    secure_filename = task_info['secure_filename']
-    pdf_filename = f"{os.path.splitext(secure_filename)[0]}.pdf"; pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
-    if os.path.exists(pdf_path): return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=False)
-    original_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename)
-    if os.path.exists(original_path): return send_from_directory(app.config['UPLOAD_FOLDER'], secure_filename, as_attachment=True)
-    return "Fichier introuvable.", 404
+
+    secure_filename_val = task_info['secure_filename']
+    pdf_filename = f"{os.path.splitext(secure_filename_val)[0]}.pdf"
+    pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
+    if os.path.exists(pdf_path):
+        return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=False)
+
+    original_path = task_info.get('original_path')
+    if original_path and os.path.exists(original_path):
+        directory, filename = os.path.split(original_path)
+        return send_from_directory(directory, filename, as_attachment=True)
+
+    return "Fichier introuvable sur le serveur.", 404
 
 @app.route('/reprint', methods=['POST'])
 def reprint_task():
@@ -410,7 +292,6 @@ def reprint_task():
     reprint_process.start()
     return jsonify({'success': True})
 
-# NOUVELLE ROUTE POUR LA RÉIMPRESSION D'UN JOB ENTIER
 @app.route('/api/reprint_job', methods=['POST'])
 def reprint_job():
     if not session.get('is_admin'): return jsonify({'success': False, 'error': 'Non autorisé'}), 403
@@ -432,7 +313,7 @@ def reprint_job():
 
     for task_info in all_tasks_in_job:
         if task_info['status'] in unprintable_statuses:
-            continue # On ignore les fichiers non imprimables
+            continue
 
         pdf_filename = f"{os.path.splitext(task_info['secure_filename'])[0]}.pdf"
         pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
@@ -453,8 +334,8 @@ def reprint_job():
     if not tasks_for_reprint:
         return jsonify({'success': False, 'error': 'Aucun fichier imprimable trouvé dans cette commande.'})
 
-    reprint_job = {'tasks': tasks_for_reprint}
-    reprint_process = Process(target=_run_print_job, args=(reprint_job,))
+    reprint_job_data = {'tasks': tasks_for_reprint}
+    reprint_process = Process(target=_run_print_job, args=(reprint_job_data,))
     reprint_process.start()
     return jsonify({'success': True})
 
@@ -478,9 +359,14 @@ def admin_data_api():
     for row in history:
         key = row.get('job_id')
         if not key: continue
-        if key not in grouped_commands: grouped_commands[key] = {'job_id': key, 'timestamp': row['timestamp'], 'client_name': row['client_name'], 'total_price': 0.0, 'files': [], 'job_status': 'success'}
-        grouped_commands[key]['files'].append(row)
+        if key not in grouped_commands:
+            grouped_commands[key] = {
+                'job_id': key, 'timestamp': row['timestamp'], 'client_name': row['client_name'],
+                'total_price': 0.0, 'files': [], 'job_status': 'success',
+                'source': row.get('source', 'upload'), 'email_subject': row.get('email_subject')
+            }
 
+        grouped_commands[key]['files'].append(row)
         try:
             price = float(row.get('price') or 0.0)
             if 'ERREUR' not in row.get('status', ''):
@@ -491,7 +377,8 @@ def admin_data_api():
         elif any(s in row.get('status', '') for s in ['EN_ATTENTE', 'EN_COURS', 'QUEUED', 'CONVERTING', 'COUNTING']):
              if grouped_commands[key]['job_status'] != 'error': grouped_commands[key]['job_status'] = 'pending'
 
-    final_commands = list(grouped_commands.values())
+    upload_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'upload']
+    email_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'email']
 
     with get_db_connection() as conn:
         valid_print_statuses = (STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT'])
@@ -501,7 +388,10 @@ def admin_data_api():
         cursor = conn.execute(f"SELECT SUM(pages * copies) FROM history WHERE status IN ({placeholders}) AND pages > 0", valid_print_statuses);
         total_pages_printed = cursor.fetchone()[0] or 0
 
-    return jsonify({'commands': final_commands, 'total_revenue': f"{total_revenue:.2f}", 'total_pages': total_pages_printed})
+    return jsonify({
+        'upload_commands': upload_commands, 'email_commands': email_commands,
+        'total_revenue': f"{total_revenue:.2f}", 'total_pages': total_pages_printed
+    })
 
 @app.route('/api/delete_task/<task_id>', methods=['POST'])
 def delete_task(task_id):
@@ -530,7 +420,7 @@ def init_db_command():
     click.echo('Base de données initialisée.')
 
 def create_folders():
-    for folder in [app.config['UPLOAD_FOLDER'], app.config['CONVERTED_FOLDER']]:
+    for folder in [app.config['UPLOAD_FOLDER'], app.config['CONVERTED_FOLDER'], app.config['EMAIL_FOLDER']]:
         if not os.path.exists(folder): os.makedirs(folder); logging.info(f"Dossier créé : {folder}")
 
 if __name__ == '__main__':
@@ -539,4 +429,12 @@ if __name__ == '__main__':
         freeze_support()
 
     create_folders()
+
+    email_thread = threading.Thread(
+        target=check_emails_periodically,
+        args=(app.config, app.app_context),
+        daemon=True
+    )
+    email_thread.start()
+
     app.run(host='0.0.0.0', port=5001)

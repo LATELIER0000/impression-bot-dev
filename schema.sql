@@ -17,5 +17,8 @@ CREATE TABLE history (
   paper_size TEXT,
   page_mode TEXT,
   start_page TEXT,
-  end_page TEXT
+  end_page TEXT,
+  source TEXT DEFAULT 'upload', -- 'upload' ou 'email'
+  email_subject TEXT,
+  original_path TEXT -- Chemin vers le fichier d'origine avant conversion
 );
