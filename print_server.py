@@ -34,7 +34,6 @@ logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(
 app = Flask(__name__)
 app.config.from_object(Config)
 
-# NOUVEAU : Ajout du "cache buster" dans le contexte des templates
 @app.context_processor
 def inject_cache_buster():
     return dict(cache_buster=int(time.time()))
@@ -112,9 +111,16 @@ def index():
 
 @app.route('/upload_and_process_file', methods=['POST'])
 def upload_and_process_file():
-    if 'file' not in request.files or not all(f in request.form for f in ['client_name', 'job_id', 'task_id']): return jsonify({'success': False, 'error': "Données manquantes."}), 400
+    if 'file' not in request.files or not all(f in request.form for f in ['client_name', 'job_id', 'task_id']):
+        return jsonify({'success': False, 'error': "Données manquantes."}), 400
+
     file = request.files['file']
-    if not allowed_file(file.filename): return jsonify({'success': False, 'error': "Type de fichier non autorisé."}), 400
+
+    # --- MODIFICATION : Double vérification côté serveur ---
+    if not allowed_file(file.filename):
+        logging.warning(f"Tentative d'upload d'un fichier non autorisé bloquée côté serveur : {file.filename}")
+        return jsonify({'success': False, 'error': "Type de fichier non autorisé."}), 400
+    # ----------------------------------------------------
 
     unique_filename = generate_unique_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)

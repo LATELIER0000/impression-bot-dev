@@ -11,6 +11,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const PRIX_NB = parseFloat(document.getElementById('prix-nb-display').textContent.replace(',', '.'));
     const PRIX_C = parseFloat(document.getElementById('prix-c-display').textContent.replace(',', '.'));
 
+    // NOUVEAU : On définit les extensions autorisées ici aussi
+    const ALLOWED_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'txt'];
+
     let fileStore = [];
     let currentJobId = null;
     let pollingInterval = null;
@@ -45,7 +48,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!fileEntry || !taskRow) return;
 
         const pricePlaceholder = taskRow.querySelector('.task-price-placeholder');
-        // MODIFIÉ: S'assurer que serverData existe avant de chercher les pages
         const pages = fileEntry.serverData ? (fileEntry.serverData.pages || 0) : 0;
 
         if (pages === 0) {
@@ -85,9 +87,17 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const newFiles = Array.from(fileInput.files);
-        fileInput.value = '';
+        fileInput.value = ''; // On vide l'input immédiatement
 
         newFiles.forEach(file => {
+            // --- MODIFICATION : Contrôle de l'extension ---
+            const extension = file.name.split('.').pop().toLowerCase();
+            if (!ALLOWED_EXTENSIONS.includes(extension)) {
+                showToast(`Le type de fichier "${file.name}" (.${extension}) n'est pas supporté.`, 'danger');
+                return; // On passe au fichier suivant sans rien faire
+            }
+            // ---------------------------------------------
+
             if (fileStore.some(f => f.file.name === file.name && f.file.size === file.size)) return;
             if (file.size === 0) {
                 showToast(`Le fichier "${file.name}" est vide et ne peut pas être envoyé.`, 'danger');
@@ -100,7 +110,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
 
         startProcessingQueue();
-        if (!pollingInterval) startPolling();
+        if (!pollingInterval && fileStore.length > 0) startPolling();
     });
 
     function addFileToListDOM(fileEntry, index) {
@@ -155,7 +165,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (!data || !data.tasks) return;
                     data.tasks.forEach(taskData => {
                         const fileEntry = fileStore.find(f => f.id === taskData.task_id);
-                        // MODIFIÉ: On met à jour même si le statut n'a pas changé, pour forcer la ré-évaluation de l'UI.
                         if (fileEntry) {
                             fileEntry.serverStatus = taskData.status;
                             fileEntry.serverData = taskData;
@@ -198,8 +207,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
         optionsContainer.classList.toggle('d-none', !isReady);
 
-        // CORRECTION: On appelle la fonction de calcul de prix à chaque mise à jour de statut.
-        // Si le fichier n'est pas prêt, la fonction mettra "--.-- €" ou "Prix à définir".
         calculateTaskPrice(taskId);
 
         const removeBtn = fileRow.querySelector('.remove-file-btn');
