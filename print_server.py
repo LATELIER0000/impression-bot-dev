@@ -4,6 +4,7 @@ import time
 import sys
 import shutil
 import glob
+import sqlite3
 from datetime import datetime, timedelta
 from collections import OrderedDict
 import threading
@@ -113,32 +114,38 @@ def _run_print_job(job):
 
 @app.route('/')
 def index():
-    return render_template('index.html', prix_nb=app.config['PRIX_NOIR_BLANC'], prix_c=app.config['PRIX_COULEUR'])
+    username = session.get('username')
+    return render_template('index.html', prix_nb=app.config['PRIX_NOIR_BLANC'], prix_c=app.config['PRIX_COULEUR'], username=username)
 
 @app.route('/upload_and_process_file', methods=['POST'])
 def upload_and_process_file():
-    if 'file' not in request.files or not all(f in request.form for f in ['client_name', 'job_id', 'task_id']):
+    username = session.get('username')
+    if not username:
+        return jsonify({'success': False, 'error': "Session expirée, veuillez vous reconnecter."}), 401
+
+    if 'file' not in request.files or not all(f in request.form for f in ['job_id', 'task_id']):
         return jsonify({'success': False, 'error': "Données manquantes."}), 400
+
     file = request.files['file']
     if not allowed_file(file.filename):
-        logging.warning(f"Tentative d'upload d'un fichier non autorisé bloquée côté serveur : {file.filename}")
         return jsonify({'success': False, 'error': "Type de fichier non autorisé."}), 400
+
     unique_filename = generate_unique_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
     file.save(filepath)
+
     try:
-        file_size = os.path.getsize(filepath)
-        if file_size == 0:
-            logging.error(f"Fichier téléversé '{file.filename}' est vide (0 octet). Abandon.")
-            task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['ERROR_FILE_EMPTY'], 'source': 'upload', 'original_path': filepath}
+        if os.path.getsize(filepath) == 0:
+            task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'username': username, 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['ERROR_FILE_EMPTY'], 'source': 'upload', 'original_path': filepath}
             db_insert_task(app.config['DATABASE_FILE'], task_data)
             os.remove(filepath)
             return jsonify({'success': True, 'task_id': task_data['task_id']})
     except OSError as e:
-        logging.error(f"Impossible d'accéder au fichier ou de lire sa taille: {e}")
         return jsonify({'success': False, 'error': "Erreur serveur à la lecture du fichier."}), 500
-    task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['QUEUED'], 'source': 'upload', 'original_path': filepath}
+
+    task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'username': username, 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['QUEUED'], 'source': 'upload', 'original_path': filepath}
     db_insert_task(app.config['DATABASE_FILE'], task_data)
+
     thread_args = {'task_id': task_data['task_id'], 'original_path': filepath, 'secure_filename': unique_filename}
     thread = threading.Thread(target=process_single_file_background, args=(thread_args, app.config)); thread.start()
     return jsonify({'success': True, 'task_id': task_data['task_id']})
@@ -156,7 +163,6 @@ def get_job_status(job_id):
             try:
                 task_time = datetime.strptime(task['timestamp'], "%Y-%m-%d %H:%M:%S")
                 if now - task_time > timedelta(seconds=timeout_seconds):
-                    logging.warning(f"Tâche {task['task_id']} ({task['file_name']}) a dépassé le temps limite. Passage en erreur.")
                     error_status = STATUS['ERROR_CONVERSION']
                     db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': error_status})
                     task['status'] = error_status
@@ -168,6 +174,8 @@ def get_job_status(job_id):
 
 @app.route('/calculate_summary', methods=['POST'])
 def calculate_summary():
+    username = session.get('username')
+    if not username: return jsonify({'success': False, 'error': 'Session expirée.'}), 401
     data = request.get_json(); job_id = data.get('job_id'); tasks_with_new_options = data.get('tasks')
     if not all([job_id, tasks_with_new_options]): return jsonify({'success': False, 'error': 'Données manquantes.'}), 400
     with get_db_connection() as conn:
@@ -200,7 +208,7 @@ def calculate_summary():
         final_pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
         tasks_ready_for_print.append({'path': final_pdf_path, 'name': original_task_data['file_name'], 'pages': pages, 'copies': copies, 'is_color': is_color, 'is_duplex': is_duplex, 'prix': prix_tache, 'paper_size': options.get('papersize', '2'), 'page_mode': page_mode, 'start_page': start_page, 'end_page': end_page, 'task_id': task_id})
     if not tasks_ready_for_print: return jsonify({'success': False, 'error': 'Aucune tâche valide trouvée.'}), 400
-    print_job_summary = {'tasks': tasks_ready_for_print, 'prix_total': total_price, 'client_name': history_tasks[tasks_ready_for_print[0]['task_id']]['client_name'], 'job_id': job_id}
+    print_job_summary = {'tasks': tasks_ready_for_print, 'prix_total': total_price, 'username': username, 'job_id': job_id}
     session['print_job'] = print_job_summary
     return jsonify({'success': True, 'print_job_summary': print_job_summary})
 
@@ -213,16 +221,17 @@ def execute_print():
     session.pop('print_job', None);
     return jsonify({'success': True})
 
+# MODIFIÉ : La fonction retourne maintenant un dictionnaire ou None
 def get_task_from_db(task_id):
     with get_db_connection() as conn:
         cursor = conn.execute("SELECT * FROM history WHERE task_id = ?", (task_id,));
-        return cursor.fetchone()
+        row = cursor.fetchone()
+        return dict(row) if row else None
 
 @app.route('/preview/<task_id>')
 def preview_file(task_id):
     task_info = get_task_from_db(task_id)
-    if not task_info:
-        return "Tâche introuvable.", 404
+    if not task_info: return "Tâche introuvable.", 404
     secure_filename_val = task_info['secure_filename']
     pdf_filename = f"{os.path.splitext(secure_filename_val)[0]}.pdf"
     pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
@@ -232,28 +241,19 @@ def preview_file(task_id):
 
 @app.route('/download/<task_id>')
 def download_file(task_id):
-    if not session.get('is_admin'): return "Accès non autorisé", 403
-
-    # Par défaut, on affiche. Le téléchargement est forcé si 'dl=1' est dans l'URL.
     force_download = request.args.get('dl') == '1'
-
     task_info = get_task_from_db(task_id)
-    if not task_info: return "Tâche introuvable.", 404
-
+    if not task_info:
+        return "Tâche introuvable. Elle a peut-être été supprimée.", 404
     secure_filename_val = task_info['secure_filename']
     pdf_filename = f"{os.path.splitext(secure_filename_val)[0]}.pdf"
     pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
-
-    # Priorité au PDF converti
     if os.path.exists(pdf_path):
         return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=force_download)
-
-    # Sinon, on prend le fichier original
     original_path = task_info.get('original_path')
     if original_path and os.path.exists(original_path):
         directory, filename = os.path.split(original_path)
         return send_from_directory(directory, filename, as_attachment=force_download)
-
     return "Fichier introuvable sur le serveur.", 404
 
 @app.route('/reprint', methods=['POST'])
@@ -285,7 +285,8 @@ def reprint_job():
     if not all_tasks_in_job: return jsonify({'success': False, 'error': f'Job {job_id} introuvable.'}), 404
     tasks_for_reprint = []
     unprintable_statuses = ['ERREUR_CONVERSION', 'ERREUR_FICHIER_VIDE', 'ERREUR_LECTURE_FATALE']
-    for task_info in all_tasks_in_job:
+    for task_info_row in all_tasks_in_job:
+        task_info = dict(task_info_row) # On s'assure de travailler avec un dictionnaire
         if task_info['status'] in unprintable_statuses: continue
         pdf_filename = f"{os.path.splitext(task_info['secure_filename'])[0]}.pdf"
         pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
@@ -316,31 +317,23 @@ def admin_data_api():
         key = row.get('job_id')
         if not key: continue
         if key not in grouped_commands:
-            grouped_commands[key] = {'job_id': key, 'timestamp': row['timestamp'], 'client_name': row['client_name'], 'total_price': 0.0, 'files': [], 'source': row.get('source', 'upload'), 'email_subject': row.get('email_subject')}
+            grouped_commands[key] = {'job_id': key, 'timestamp': row['timestamp'], 'username': row['username'], 'total_price': 0.0, 'files': [], 'source': row.get('source', 'upload'), 'email_subject': row.get('email_subject')}
         grouped_commands[key]['files'].append(row)
         try:
             price = float(row.get('price') or 0.0)
             if 'ERREUR' not in row.get('status', ''):
                 grouped_commands[key]['total_price'] += price
         except (ValueError, TypeError): pass
-
     for job_id, command in grouped_commands.items():
         statuses = [f['status'] for f in command['files']]
         job_status = 'unknown'
-        if any('ERREUR' in s for s in statuses):
-            job_status = 'error'
-        elif all(s in (STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT']) for s in statuses):
-            job_status = 'completed'
-        elif any(s == STATUS['PRINTING'] for s in statuses):
-            job_status = 'printing'
-        elif any(s in (STATUS['QUEUED'], STATUS['CONVERTING'], STATUS['COUNTING']) for s in statuses):
-            job_status = 'pending'
-        elif all(s in (STATUS['READY'], STATUS['READY_NO_PAGE_COUNT']) for s in statuses):
-            job_status = 'ready'
-        else:
-            job_status = 'pending'
+        if any('ERREUR' in s for s in statuses): job_status = 'error'
+        elif all(s in (STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT']) for s in statuses): job_status = 'completed'
+        elif any(s == STATUS['PRINTING'] for s in statuses): job_status = 'printing'
+        elif any(s in (STATUS['QUEUED'], STATUS['CONVERTING'], STATUS['COUNTING']) for s in statuses): job_status = 'pending'
+        elif all(s in (STATUS['READY'], STATUS['READY_NO_PAGE_COUNT']) for s in statuses): job_status = 'ready'
+        else: job_status = 'pending'
         command['job_status'] = job_status
-
     upload_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'upload']
     email_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'email']
     with get_db_connection() as conn:
@@ -372,48 +365,127 @@ def delete_all_tasks():
 @app.route('/api/browse_files')
 def browse_files():
     if not session.get('is_admin'): return jsonify({'error': 'Non autorisé'}), 403
-
     base_path = app.config['UPLOAD_FOLDER']
     files_list = []
-
     for root, dirs, files in os.walk(base_path):
         for name in files:
             file_path = os.path.join(root, name)
             try:
                 stat = os.stat(file_path)
-                files_list.append({
-                    'name': name,
-                    'path': os.path.relpath(file_path, base_path),
-                    'size': stat.st_size,
-                    'modified': datetime.fromtimestamp(stat.st_mtime).strftime('%d/%m/%Y %H:%M')
-                })
-            except OSError:
-                continue
-
+                files_list.append({'name': name, 'path': os.path.relpath(file_path, base_path), 'size': stat.st_size, 'modified': datetime.fromtimestamp(stat.st_mtime).strftime('%d/%m/%Y %H:%M')})
+            except OSError: continue
     files_list.sort(key=lambda x: x['modified'], reverse=True)
     return jsonify(files_list)
 
 @app.route('/api/download_raw_file')
 def download_raw_file():
     if not session.get('is_admin'): return "Accès non autorisé", 403
-
     file_rel_path = request.args.get('path')
     if not file_rel_path: return "Chemin de fichier manquant.", 400
-
     force_download = request.args.get('dl') == '1'
-
     base_dir = os.path.abspath(app.config['UPLOAD_FOLDER'])
     requested_path = os.path.abspath(os.path.join(base_dir, file_rel_path))
-
     if not requested_path.startswith(base_dir):
-        logging.warning(f"Tentative de Directory Traversal bloquée: {file_rel_path}")
         return "Chemin invalide.", 400
-
     if os.path.exists(requested_path) and os.path.isfile(requested_path):
         directory, filename = os.path.split(requested_path)
         return send_from_directory(directory, filename, as_attachment=force_download)
-
     return "Fichier introuvable.", 404
+
+@app.route('/user_login', methods=['POST'])
+def user_login():
+    username = request.form.get('username')
+    if not username or len(username) < 3:
+        return jsonify({'success': False, 'error': 'L\'identifiant doit faire au moins 3 caractères.'})
+
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT id FROM users WHERE username = ?", (username,))
+        user = cursor.fetchone()
+        if not user:
+            try:
+                cursor.execute("INSERT INTO users (username) VALUES (?)", (username,))
+                conn.commit()
+                logging.info(f"Nouvel utilisateur créé : {username}")
+            except sqlite3.IntegrityError:
+                 return jsonify({'success': False, 'error': 'Cet identifiant est déjà utilisé.'})
+
+    session['username'] = username
+    logging.info(f"Utilisateur connecté : {username}")
+    return jsonify({'success': True})
+
+@app.route('/user_logout')
+def user_logout():
+    session.pop('username', None)
+    return redirect(url_for('index'))
+
+@app.route('/api/user_history')
+def user_history_api():
+    username = session.get('username')
+    if not username:
+        return jsonify({'error': 'Non autorisé'}), 401
+
+    with get_db_connection() as conn:
+        cursor = conn.execute("SELECT * FROM history WHERE username = ? ORDER BY timestamp DESC", (username,));
+        history = [dict(row) for row in cursor.fetchall()]
+
+    grouped_commands = OrderedDict()
+    for row in history:
+        key = row.get('job_id')
+        if not key: continue
+        if key not in grouped_commands:
+            grouped_commands[key] = {'job_id': key, 'timestamp': row['timestamp'], 'username': row['username'], 'total_price': 0.0, 'files': [], 'source': row.get('source', 'upload'), 'email_subject': row.get('email_subject')}
+        grouped_commands[key]['files'].append(row)
+        try:
+            price = float(row.get('price') or 0.0)
+            if 'ERREUR' not in row.get('status', ''):
+                grouped_commands[key]['total_price'] += price
+        except (ValueError, TypeError): pass
+
+    return jsonify(list(grouped_commands.values()))
+
+@app.route('/api/user_reprint', methods=['POST'])
+def user_reprint_task():
+    username = session.get('username')
+    if not username:
+        return jsonify({'success': False, 'error': 'Session expirée, veuillez vous reconnecter.'}), 401
+
+    data = request.get_json()
+    task_id = data.get('task_id')
+    if not task_id:
+        return jsonify({'success': False, 'error': 'Données de la tâche manquantes.'}), 400
+
+    task_info = get_task_from_db(task_id)
+    if not task_info:
+        return jsonify({'success': False, 'error': f'Tâche {task_id} introuvable.'}), 404
+
+    # Contrôle de sécurité : l'utilisateur ne peut réimprimer que ses propres tâches
+    if task_info['username'] != username:
+        return jsonify({'success': False, 'error': 'Action non autorisée.'}), 403
+
+    pdf_filename = f"{os.path.splitext(task_info['secure_filename'])[0]}.pdf"
+    pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
+    if not os.path.exists(pdf_path):
+        return jsonify({'success': False, 'error': f'Le fichier à imprimer n\'est plus disponible sur le serveur.'}), 404
+
+    reprint_job = {
+        'tasks': [{
+            'path': pdf_path,
+            'name': task_info['file_name'],
+            'copies': data.get('copies', 1),
+            'pages': task_info['pages'],
+            'is_color': data.get('is_color', False),
+            'is_duplex': data.get('is_duplex', False),
+            # MODIFIÉ : Utilisation de .get() car task_info est maintenant un dictionnaire
+            'paper_size': task_info.get('paper_size') or '2',
+            'page_mode': 'all', # La réimpression depuis l'historique imprime toujours tout le document
+            'task_id': task_id
+        }]
+    }
+
+    reprint_process = Process(target=_run_print_job, args=(reprint_job,))
+    reprint_process.start()
+    return jsonify({'success': True})
 
 @app.route('/logout')
 def logout():

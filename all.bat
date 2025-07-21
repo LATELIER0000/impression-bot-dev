@@ -19,7 +19,7 @@ echo. >> %OUTPUT_FILE%
 
 :: Liste EXACTE des fichiers à inclure
 :: Note : J'utilise *.sql car tu as dit "un fichier SQL". Si tu en as plusieurs, remplace *.sql par le nom exact (ex: "database.sql").
-set "FILES_TO_PROCESS=config.py print_server.py *.sql static\css\style.css static\js\admin.js static\js\main.js templates\index.html templates\admin.html"
+set "FILES_TO_PROCESS=config.py print_server.py email_processor.py core.py *.sql static\css\style.css static\js\admin.js static\js\main.js templates\index.html templates\admin.html"
 
 :: Boucle sur chaque fichier de la liste
 for %%F in (%FILES_TO_PROCESS%) do (

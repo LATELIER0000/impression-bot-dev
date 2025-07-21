@@ -30,23 +30,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 tbody.innerHTML = files.map(file => {
                     const previewUrl = `/api/download_raw_file?path=${encodeURIComponent(file.path)}`;
                     const downloadUrl = `/api/download_raw_file?path=${encodeURIComponent(file.path)}&dl=1`;
-
-                    return `
-                        <tr>
-                            <td style="word-break: break-all;">
-                                <a href="${previewUrl}" target="_blank" class="text-decoration-none" title="Ouvrir le fichier">
-                                    <i class="bi bi-file-earmark-text"></i> ${file.path.replace(/\\/g, '/')}
-                                </a>
-                            </td>
-                            <td>${formatBytes(file.size)}</td>
-                            <td>${file.modified}</td>
-                            <td class="text-end">
-                                <a href="${downloadUrl}" class="btn btn-sm btn-outline-secondary" title="Télécharger">
-                                    <i class="bi bi-download"></i>
-                                </a>
-                            </td>
-                        </tr>
-                    `;
+                    return `<tr><td style="word-break: break-all;"><a href="${previewUrl}" target="_blank" class="text-decoration-none" title="Ouvrir le fichier"><i class="bi bi-file-earmark-text"></i> ${file.path.replace(/\\/g, '/')}</a></td><td>${formatBytes(file.size)}</td><td>${file.modified}</td><td class="text-end"><a href="${downloadUrl}" class="btn btn-sm btn-outline-secondary" title="Télécharger"><i class="bi bi-download"></i></a></td></tr>`;
                 }).join('');
             })
             .catch(err => {
@@ -65,7 +49,6 @@ document.addEventListener('DOMContentLoaded', function() {
         const reprintToast = reprintToastEl ? new bootstrap.Toast(reprintToastEl) : null;
         let currentPopover = null;
 
-        // MODIFIÉ : Centralisation de la logique de rafraîchissement
         function refreshAllData() {
             fetchAdminData();
             initializeFileExplorer();
@@ -79,8 +62,7 @@ document.addEventListener('DOMContentLoaded', function() {
             const filesHTML = command.files.map(file => {
                 let statusBadge;
                 const status = file.status || 'INCONNU';
-                const unprintableStatuses = ['ERREUR_CONVERSION', 'ERREUR_FICHIER_VIDE', 'ERREUR_LECTURE_FATALE'];
-                const isPrintable = !unprintableStatuses.includes(status) && file.task_id;
+                const isPrintable = !['ERREUR_CONVERSION', 'ERREUR_FICHIER_VIDE', 'ERREUR_LECTURE_FATALE'].includes(status) && file.task_id;
                 if (status.includes('ERREUR')) statusBadge = `<span class="badge bg-danger">${status.replace(/_/g, ' ')}</span>`;
                 else if (status.includes('IMPRIME')) statusBadge = `<span class="badge bg-success">Imprimé</span>`;
                 else if (status.includes('IMPRESSION_EN_COURS')) statusBadge = `<span class="badge bg-info text-dark">Impression...</span>`;
@@ -92,39 +74,16 @@ document.addEventListener('DOMContentLoaded', function() {
             }).join('');
 
             const cardStatusClass = `status-${command.job_status || 'unknown'}`;
-            const isEmail = command.source === 'email';
-            const title = command.client_name;
+            // MODIFIÉ : On utilise 'username' comme titre principal
+            const title = command.username;
             const subtitle = command.timestamp;
+            const isEmail = command.source === 'email';
             const sourceIcon = isEmail ? '<i class="bi bi-envelope-at-fill text-muted me-1" title="Source: Email"></i>' : '<i class="bi bi-upload text-muted me-1" title="Source: Upload"></i>';
             const subjectHTML = isEmail && command.email_subject
                 ? `<small class="d-block text-muted fst-italic mt-1" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${command.email_subject}">Objet : ${command.email_subject}</small>`
                 : '';
 
-            return `
-                <div class="card shadow-sm mb-3 ${cardStatusClass}">
-                    <div class="card-body">
-                        <div class="d-flex justify-content-between align-items-center">
-                            <a href="#" class="text-decoration-none text-dark flex-grow-1" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
-                                <h5 class="card-title mb-0">${sourceIcon}${title}</h5>
-                                <small class="text-muted">${subtitle}</small>
-                                ${subjectHTML}
-                            </a>
-                            <div class="text-end ms-3">
-                                <strong class="fs-5">${command.total_price.toFixed(2)} €</strong>
-                                <div class="small text-muted">${command.files.length} fichier(s) <i class="bi bi-chevron-down"></i></div>
-                            </div>
-                        </div>
-                        <div class="collapse ${showClass}" id="${collapseId}">
-                            <hr>
-                            <div class="d-flex justify-content-end mb-3">
-                                <button class="btn btn-sm btn-dark reprint-job-btn" data-job-id="${command.job_id}">
-                                    <i class="bi bi-printer-fill"></i> Réimprimer toute la commande
-                                </button>
-                            </div>
-                            <ul class="list-group list-group-flush">${filesHTML}</ul>
-                        </div>
-                    </div>
-                </div>`;
+            return `<div class="card shadow-sm mb-3 ${cardStatusClass}"><div class="card-body"><div class="d-flex justify-content-between align-items-center"><a href="#" class="text-decoration-none text-dark flex-grow-1" data-bs-toggle="collapse" data-bs-target="#${collapseId}"><h5 class="card-title mb-0">${sourceIcon}${title}</h5><small class="text-muted">${subtitle}</small>${subjectHTML}</a><div class="text-end ms-3"><strong class="fs-5">${command.total_price.toFixed(2)} €</strong><div class="small text-muted">${command.files.length} fichier(s) <i class="bi bi-chevron-down"></i></div></div></div><div class="collapse ${showClass}" id="${collapseId}"><hr><div class="d-flex justify-content-end mb-3"><button class="btn btn-sm btn-dark reprint-job-btn" data-job-id="${command.job_id}"><i class="bi bi-printer-fill"></i> Réimprimer toute la commande</button></div><ul class="list-group list-group-flush">${filesHTML}</ul></div></div></div>`;
         };
 
         const fetchAdminData = () => {
@@ -138,23 +97,19 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (data.error) throw new Error(data.error);
                     document.getElementById('total-revenue-display').textContent = `${data.total_revenue} €`;
                     document.getElementById('total-pages-display').textContent = data.total_pages;
-
                     const allCombinedCommands = [...(data.upload_commands || []), ...(data.email_commands || [])];
                     deleteAllBtn.disabled = allCombinedCommands.length === 0;
-
                     if (allCombinedCommands.length === 0) {
                         allCommandsContainer.innerHTML = '<p class="text-center text-muted p-4">Aucune commande pour le moment.</p>';
                     } else {
                         allCombinedCommands.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
                         allCommandsContainer.innerHTML = allCombinedCommands.map(createCommandCardHTML).join('');
                     }
-
                     if (!data.upload_commands || data.upload_commands.length === 0) {
                         uploadCommandsContainer.innerHTML = '<p class="text-center text-muted p-4">Aucune commande par upload.</p>';
                     } else {
                         uploadCommandsContainer.innerHTML = data.upload_commands.map(createCommandCardHTML).join('');
                     }
-
                     if (!data.email_commands || data.email_commands.length === 0) {
                         emailCommandsContainer.innerHTML = '<p class="text-center text-muted p-4">Aucune commande par email.</p>';
                     } else {
@@ -167,9 +122,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
         };
 
-        // MODIFIÉ : Le bouton de rafraîchissement manuel appelle la fonction centralisée
         refreshBtn.addEventListener('click', refreshAllData);
-
         deleteAllBtn.addEventListener('click', () => {
              if (confirm("ATTENTION !\n\nÊtes-vous sûr de vouloir effacer TOUT l'historique ?\n\nCETTE ACTION EST IRRÉVERSIBLE.")) {
                 fetch('/api/delete_all_tasks', { method: 'POST' }).then(res => res.json()).then(data => {
@@ -177,12 +130,10 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
             }
         });
-
         function getPopoverContent(id, type) {
             const idAttribute = type === 'task' ? `data-task-id="${id}"` : `data-job-id="${id}"`;
             return `<div class="reprint-popover-body"><div class="mb-2"><label class="form-label">Couleur</label><div class="reprint-option-group"><button type="button" class="option-btn active" data-name="is_color" data-value="false">N&B</button><button type="button" class="option-btn" data-name="is_color" data-value="true">Couleur</button></div></div><div class="mb-3"><label class="form-label">Recto/Verso</label><div class="reprint-option-group"><button type="button" class="option-btn active" data-name="is_duplex" data-value="false">Recto</button><button type="button" class="option-btn" data-name="is_duplex" data-value="true">R/V</button></div></div><div class="mb-3"><label class="form-label">Copies</label><input type="number" class="form-control form-control-sm popover-copies-input" value="1" min="1"></div><button class="btn btn-sm btn-dark w-100 reprint-popover-confirm-btn" ${idAttribute}>Valider</button></div>`;
         }
-
         adminPanel.addEventListener('click', (event) => {
             const reprintBtn = event.target.closest('.reprint-btn');
             const reprintJobBtn = event.target.closest('.reprint-job-btn');
@@ -205,7 +156,6 @@ document.addEventListener('DOMContentLoaded', function() {
                 }
             }
         });
-
         document.body.addEventListener('click', function(event) {
             const target = event.target;
             const confirmBtn = target.closest('.reprint-popover-confirm-btn');
@@ -234,20 +184,15 @@ document.addEventListener('DOMContentLoaded', function() {
                     .finally(() => { if (currentPopover) { currentPopover.dispose(); currentPopover = null; } });
             }
         });
-
         document.addEventListener("visibilitychange", () => {
             if (document.hidden) {
                 clearInterval(refreshInterval);
             } else {
-                // MODIFIÉ : Rafraîchit tout en revenant sur la page
                 refreshAllData();
                 refreshInterval = setInterval(refreshAllData, 5000);
             }
         });
-
-        // Appel initial
         refreshAllData();
-        // MODIFIÉ : Le rafraîchissement automatique appelle maintenant la fonction centralisée
         refreshInterval = setInterval(refreshAllData, 5000);
     }
 
