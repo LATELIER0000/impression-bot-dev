@@ -35,14 +35,14 @@ class Config:
     EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS') or 'latelier0000@gmail.com'
     EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD') or 'tiwt ipas vtad hbib'
     EMAIL_CHECK_INTERVAL = 10
-    EMAIL_PROCESSED_MAILBOX = 'Traités' # Nom du dossier où déplacer les emails traités
+    # MODIFIÉ : Nom du dossier sans accent pour éviter les erreurs d'encodage
+    EMAIL_PROCESSED_MAILBOX = 'Traites' # Était 'Traités'
 
     # --- Chemins des fichiers et dossiers ---
     UPLOAD_FOLDER = os.path.join(basedir, 'uploads')
     CONVERTED_FOLDER = os.path.join(UPLOAD_FOLDER, 'converted')
     EMAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'emails') # Dossier pour les pièces jointes
     DATABASE_FILE = os.path.join(basedir, 'history.db')
-    # AMÉLIORATION : Ajout de la configuration pour le nettoyage
     FILE_RETENTION_DAYS = 7 # Jours avant de supprimer les anciens fichiers
 
     # --- Dépendances externes ---
@@ -50,7 +50,6 @@ class Config:
 
     # --- URL et Sélecteurs de l'imprimante ---
     URL_PDF_PRINT = f"http://{PRINTER_IP}/direct"
-    # AMÉLIORATION : Centralisation des sélecteurs Selenium
     PRINTER_START_BUTTON_XPATH = "//input[contains(@value, \"Démarrer l'impression\")]"
     PRINTER_COLOR_MODE_SELECTOR = "select[name='ColorMode']"
     PRINTER_DUPLEX_CHECKBOX_ID = "DuplexMode"

@@ -65,6 +65,12 @@ document.addEventListener('DOMContentLoaded', function() {
         const reprintToast = reprintToastEl ? new bootstrap.Toast(reprintToastEl) : null;
         let currentPopover = null;
 
+        // MODIFIÉ : Centralisation de la logique de rafraîchissement
+        function refreshAllData() {
+            fetchAdminData();
+            initializeFileExplorer();
+        }
+
         const createCommandCardHTML = (command) => {
             const collapseId = `command-details-${command.job_id}`;
             const openCollapses = new Set(Array.from(document.querySelectorAll('.collapse.show')).map(el => el.id));
@@ -86,11 +92,39 @@ document.addEventListener('DOMContentLoaded', function() {
             }).join('');
 
             const cardStatusClass = `status-${command.job_status || 'unknown'}`;
-            const title = command.source === 'email' ? command.email_subject || 'Email sans sujet' : command.client_name;
+            const isEmail = command.source === 'email';
+            const title = command.client_name;
             const subtitle = command.timestamp;
-            const sourceIcon = command.source === 'email' ? '<i class="bi bi-envelope-at-fill text-muted me-1" title="Source: Email"></i>' : '<i class="bi bi-upload text-muted me-1" title="Source: Upload"></i>';
+            const sourceIcon = isEmail ? '<i class="bi bi-envelope-at-fill text-muted me-1" title="Source: Email"></i>' : '<i class="bi bi-upload text-muted me-1" title="Source: Upload"></i>';
+            const subjectHTML = isEmail && command.email_subject
+                ? `<small class="d-block text-muted fst-italic mt-1" style="white-space: nowrap; overflow: hidden; text-overflow: ellipsis;" title="${command.email_subject}">Objet : ${command.email_subject}</small>`
+                : '';
 
-            return `<div class="card shadow-sm mb-3 ${cardStatusClass}"><div class="card-body"><div class="d-flex justify-content-between align-items-center"><a href="#" class="text-decoration-none text-dark flex-grow-1" data-bs-toggle="collapse" data-bs-target="#${collapseId}"><h5 class="card-title mb-0">${sourceIcon}${title}</h5><small class="text-muted">${subtitle}</small></a><div class="text-end ms-3"><strong class="fs-5">${command.total_price.toFixed(2)} €</strong><div class="small text-muted">${command.files.length} fichier(s) <i class="bi bi-chevron-down"></i></div></div></div><div class="collapse ${showClass}" id="${collapseId}"><hr><div class="d-flex justify-content-end mb-3"><button class="btn btn-sm btn-dark reprint-job-btn" data-job-id="${command.job_id}"><i class="bi bi-printer-fill"></i> Réimprimer toute la commande</button></div><ul class="list-group list-group-flush">${filesHTML}</ul></div></div></div>`;
+            return `
+                <div class="card shadow-sm mb-3 ${cardStatusClass}">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <a href="#" class="text-decoration-none text-dark flex-grow-1" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
+                                <h5 class="card-title mb-0">${sourceIcon}${title}</h5>
+                                <small class="text-muted">${subtitle}</small>
+                                ${subjectHTML}
+                            </a>
+                            <div class="text-end ms-3">
+                                <strong class="fs-5">${command.total_price.toFixed(2)} €</strong>
+                                <div class="small text-muted">${command.files.length} fichier(s) <i class="bi bi-chevron-down"></i></div>
+                            </div>
+                        </div>
+                        <div class="collapse ${showClass}" id="${collapseId}">
+                            <hr>
+                            <div class="d-flex justify-content-end mb-3">
+                                <button class="btn btn-sm btn-dark reprint-job-btn" data-job-id="${command.job_id}">
+                                    <i class="bi bi-printer-fill"></i> Réimprimer toute la commande
+                                </button>
+                            </div>
+                            <ul class="list-group list-group-flush">${filesHTML}</ul>
+                        </div>
+                    </div>
+                </div>`;
         };
 
         const fetchAdminData = () => {
@@ -133,15 +167,13 @@ document.addEventListener('DOMContentLoaded', function() {
                 });
         };
 
-        refreshBtn.addEventListener('click', () => {
-            fetchAdminData();
-            initializeFileExplorer();
-        });
+        // MODIFIÉ : Le bouton de rafraîchissement manuel appelle la fonction centralisée
+        refreshBtn.addEventListener('click', refreshAllData);
 
         deleteAllBtn.addEventListener('click', () => {
              if (confirm("ATTENTION !\n\nÊtes-vous sûr de vouloir effacer TOUT l'historique ?\n\nCETTE ACTION EST IRRÉVERSIBLE.")) {
                 fetch('/api/delete_all_tasks', { method: 'POST' }).then(res => res.json()).then(data => {
-                    if (data.success) fetchAdminData(); else alert(`Erreur: ${data.error}`);
+                    if (data.success) refreshAllData(); else alert(`Erreur: ${data.error}`);
                 });
             }
         });
@@ -169,7 +201,7 @@ document.addEventListener('DOMContentLoaded', function() {
                 if (currentPopover) currentPopover.dispose();
                 const { taskId, filename } = deleteTaskBtn.dataset;
                 if (confirm(`Supprimer la tâche pour "${filename}" ?`)) {
-                    fetch(`/api/delete_task/${taskId}`, { method: 'POST' }).then(res => res.json()).then(data => { if (data.success) fetchAdminData(); else alert(`Erreur: ${data.error}`); });
+                    fetch(`/api/delete_task/${taskId}`, { method: 'POST' }).then(res => res.json()).then(data => { if (data.success) refreshAllData(); else alert(`Erreur: ${data.error}`); });
                 }
             }
         });
@@ -204,13 +236,19 @@ document.addEventListener('DOMContentLoaded', function() {
         });
 
         document.addEventListener("visibilitychange", () => {
-            if (document.hidden) clearInterval(refreshInterval);
-            else { fetchAdminData(); refreshInterval = setInterval(fetchAdminData, 5000); }
+            if (document.hidden) {
+                clearInterval(refreshInterval);
+            } else {
+                // MODIFIÉ : Rafraîchit tout en revenant sur la page
+                refreshAllData();
+                refreshInterval = setInterval(refreshAllData, 5000);
+            }
         });
 
-        fetchAdminData();
-        initializeFileExplorer();
-        refreshInterval = setInterval(fetchAdminData, 5000);
+        // Appel initial
+        refreshAllData();
+        // MODIFIÉ : Le rafraîchissement automatique appelle maintenant la fonction centralisée
+        refreshInterval = setInterval(refreshAllData, 5000);
     }
 
     function showAdminPanel() {
