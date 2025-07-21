@@ -3,6 +3,7 @@ import os
 import time
 import sys
 import shutil
+import glob
 from datetime import datetime, timedelta
 from collections import OrderedDict
 import threading
@@ -38,6 +39,13 @@ app.config.from_object(Config)
 def inject_cache_buster():
     return dict(cache_buster=int(time.time()))
 
+@app.after_request
+def add_header(response):
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+
 def get_db_connection():
     return core_get_db_connection(app.config['DATABASE_FILE'])
 
@@ -68,32 +76,30 @@ def _run_print_job(job):
             logging.info(f"Impression de la tâche {task['task_id']}...")
             db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': STATUS['PRINTING']})
             driver.get(app.config['URL_PDF_PRINT'])
-            wait.until(EC.presence_of_element_located((By.XPATH, "//input[contains(@value, \"Démarrer l'impression\")]")))
-            Select(driver.find_element(By.CSS_SELECTOR, "select[name='ColorMode']")).select_by_value("0" if task['is_color'] else "1")
+            wait.until(EC.presence_of_element_located((By.XPATH, app.config['PRINTER_START_BUTTON_XPATH'])))
+            Select(driver.find_element(By.CSS_SELECTOR, app.config['PRINTER_COLOR_MODE_SELECTOR'])).select_by_value("0" if task['is_color'] else "1")
             if task['is_duplex']:
-                if not driver.find_element(By.ID, "DuplexMode").is_selected(): driver.find_element(By.ID, "DuplexMode").click()
-                Select(driver.find_element(By.CSS_SELECTOR, "select[name='DuplexType']")).select_by_value("2")
-            Select(driver.find_element(By.CSS_SELECTOR, "select[name='MediaSize']")).select_by_value(task.get('paper_size', '2'))
-            copies_input = driver.find_element(By.ID, "Copies")
+                if not driver.find_element(By.ID, app.config['PRINTER_DUPLEX_CHECKBOX_ID']).is_selected(): driver.find_element(By.ID, app.config['PRINTER_DUPLEX_CHECKBOX_ID']).click()
+                Select(driver.find_element(By.CSS_SELECTOR, app.config['PRINTER_DUPLEX_TYPE_SELECTOR'])).select_by_value("2")
+            Select(driver.find_element(By.CSS_SELECTOR, app.config['PRINTER_MEDIA_SIZE_SELECTOR'])).select_by_value(task.get('paper_size', '2'))
+            copies_input = driver.find_element(By.ID, app.config['PRINTER_COPIES_INPUT_ID'])
             copies_input.clear(); copies_input.send_keys(str(task.get('copies', 1)))
             if task.get('page_mode') == 'range' and task.get('start_page') and task.get('end_page'):
-                range_radio_btn = driver.find_element(By.ID, 'PageMode2')
+                range_radio_btn = driver.find_element(By.ID, app.config['PRINTER_PAGE_MODE_RANGE_ID'])
                 driver.execute_script("arguments[0].click();", range_radio_btn)
-                start_page_input = wait.until(EC.element_to_be_clickable((By.ID, 'StartPage')))
-                end_page_input = wait.until(EC.element_to_be_clickable((By.ID, 'EndPage')))
+                start_page_input = wait.until(EC.element_to_be_clickable((By.ID, app.config['PRINTER_START_PAGE_INPUT_ID'])))
+                end_page_input = wait.until(EC.element_to_be_clickable((By.ID, app.config['PRINTER_END_PAGE_INPUT_ID'])))
                 start_page_input.send_keys(str(task.get('start_page', '1'))); end_page_input.send_keys(str(task.get('end_page', '1')))
             else:
-                driver.find_element(By.ID, 'PageMode1').click()
-            driver.find_element(By.NAME, "File").send_keys(os.path.abspath(task['path']))
-            driver.find_element(By.XPATH, "//input[contains(@value, \"Démarrer l'impression\")]").click()
-            wait.until(EC.url_contains("pprint.cgi"))
-            return_button_xpath = "//input[contains(@value, 'Retour à la page précédente')]"
+                driver.find_element(By.ID, app.config['PRINTER_PAGE_MODE_ALL_ID']).click()
+            driver.find_element(By.NAME, app.config['PRINTER_FILE_INPUT_NAME']).send_keys(os.path.abspath(task['path']))
+            driver.find_element(By.XPATH, app.config['PRINTER_START_BUTTON_XPATH']).click()
+            wait.until(EC.url_contains(app.config['PRINTER_SUCCESS_URL_CONTAINS']))
+            return_button_xpath = app.config['PRINTER_RETURN_BUTTON_XPATH']
             wait.until(EC.element_to_be_clickable((By.XPATH, return_button_xpath)))
             logging.info(f"Tâche {task['task_id']} envoyée à l'imprimante avec succès.")
-
             final_success_status = STATUS['PRINT_SUCCESS_NO_COUNT'] if task.get('pages', 0) == 0 else STATUS['PRINT_SUCCESS']
             db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': final_success_status})
-
             if i < len(job['tasks']) - 1: driver.find_element(By.XPATH, return_button_xpath).click()
         return True
     except Exception as e:
@@ -113,19 +119,13 @@ def index():
 def upload_and_process_file():
     if 'file' not in request.files or not all(f in request.form for f in ['client_name', 'job_id', 'task_id']):
         return jsonify({'success': False, 'error': "Données manquantes."}), 400
-
     file = request.files['file']
-
-    # --- MODIFICATION : Double vérification côté serveur ---
     if not allowed_file(file.filename):
         logging.warning(f"Tentative d'upload d'un fichier non autorisé bloquée côté serveur : {file.filename}")
         return jsonify({'success': False, 'error': "Type de fichier non autorisé."}), 400
-    # ----------------------------------------------------
-
     unique_filename = generate_unique_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
     file.save(filepath)
-
     try:
         file_size = os.path.getsize(filepath)
         if file_size == 0:
@@ -137,17 +137,10 @@ def upload_and_process_file():
     except OSError as e:
         logging.error(f"Impossible d'accéder au fichier ou de lire sa taille: {e}")
         return jsonify({'success': False, 'error': "Erreur serveur à la lecture du fichier."}), 500
-
     task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['QUEUED'], 'source': 'upload', 'original_path': filepath}
     db_insert_task(app.config['DATABASE_FILE'], task_data)
-
-    thread_args = {
-        'task_id': task_data['task_id'],
-        'original_path': filepath,
-        'secure_filename': unique_filename
-    }
+    thread_args = {'task_id': task_data['task_id'], 'original_path': filepath, 'secure_filename': unique_filename}
     thread = threading.Thread(target=process_single_file_background, args=(thread_args, app.config)); thread.start()
-
     return jsonify({'success': True, 'task_id': task_data['task_id']})
 
 @app.route('/get_job_status/<job_id>')
@@ -155,11 +148,9 @@ def get_job_status(job_id):
     with get_db_connection() as conn:
         cursor = conn.execute("SELECT * FROM history WHERE job_id = ?", (job_id,))
         tasks_from_db = [dict(row) for row in cursor.fetchall()]
-
     timeout_seconds = app.config.get('TASK_PROCESSING_TIMEOUT', 30)
     now = datetime.now()
     processing_statuses = [STATUS['QUEUED'], STATUS['CONVERTING'], STATUS['COUNTING']]
-
     for task in tasks_from_db:
         if task['status'] in processing_statuses:
             try:
@@ -169,41 +160,26 @@ def get_job_status(job_id):
                     error_status = STATUS['ERROR_CONVERSION']
                     db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': error_status})
                     task['status'] = error_status
-            except (ValueError, TypeError):
-                continue
-
-    tasks_for_ui = [
-        {'task_id': t['task_id'], 'file_name': t['file_name'], 'status': t['status'], 'pages': t['pages'], 'price': t['price']}
-        for t in tasks_from_db
-    ]
-
-    final_statuses = [
-        STATUS['READY'], STATUS['READY_NO_PAGE_COUNT'], STATUS['ERROR_CONVERSION'],
-        STATUS['ERROR_PAGE_COUNT'], STATUS['ERROR_FILE_EMPTY'], STATUS['ERROR_FATAL_READ'],
-        STATUS['PRINT_FAILED'], STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT']
-    ]
+            except (ValueError, TypeError): continue
+    tasks_for_ui = [{'task_id': t['task_id'], 'file_name': t['file_name'], 'status': t['status'], 'pages': t['pages'], 'price': t['price']} for t in tasks_from_db]
+    final_statuses = [STATUS['READY'], STATUS['READY_NO_PAGE_COUNT'], STATUS['ERROR_CONVERSION'], STATUS['ERROR_PAGE_COUNT'], STATUS['ERROR_FILE_EMPTY'], STATUS['ERROR_FATAL_READ'], STATUS['PRINT_FAILED'], STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT']]
     is_complete = all(task['status'] in final_statuses for task in tasks_from_db)
-
     return jsonify({'job_id': job_id, 'tasks': tasks_for_ui, 'is_complete': is_complete})
 
 @app.route('/calculate_summary', methods=['POST'])
 def calculate_summary():
     data = request.get_json(); job_id = data.get('job_id'); tasks_with_new_options = data.get('tasks')
     if not all([job_id, tasks_with_new_options]): return jsonify({'success': False, 'error': 'Données manquantes.'}), 400
-
     with get_db_connection() as conn:
         cursor = conn.execute("SELECT * FROM history WHERE job_id = ? AND (status = ? OR status = ?)", (job_id, STATUS['READY'], STATUS['READY_NO_PAGE_COUNT']));
         history_tasks = {dict(row)['task_id']: dict(row) for row in cursor.fetchall()}
-
     tasks_ready_for_print = []; total_price = 0.0
     for task_options in tasks_with_new_options:
         task_id = task_options.get('task_id'); original_task_data = history_tasks.get(task_id)
         if not original_task_data: continue
-
         options = task_options.get('options', {});
         pages = int(original_task_data.get('pages') or 0);
         is_color = options.get('color') == 'color'; is_duplex = options.get('siding') == 'recto_verso'; copies = int(options.get('copies', 1)); page_mode = options.get('pagemode', 'all'); start_page = options.get('startpage'); end_page = options.get('endpage')
-
         prix_tache = 0.0
         pages_a_imprimer = 0
         if pages > 0:
@@ -216,17 +192,13 @@ def calculate_summary():
             prix_par_page = app.config['PRIX_COULEUR'] if is_color else app.config['PRIX_NOIR_BLANC']
             prix_tache = pages_a_imprimer * prix_par_page * copies
             total_price += prix_tache
-
         if pages == 0:
             page_mode = 'all'; start_page = None; end_page = None
-
         update_data = {'copies': copies, 'color': 'Couleur' if is_color else 'N&B', 'duplex': 'Recto-Verso' if is_duplex else 'Recto', 'price': f"{prix_tache:.2f}" if pages > 0 else "0.00", 'paper_size': options.get('papersize', '2'), 'page_mode': page_mode, 'start_page': start_page, 'end_page': end_page}
         db_update_task(app.config['DATABASE_FILE'], task_id, update_data)
-
         pdf_filename = f"{os.path.splitext(original_task_data['secure_filename'])[0]}.pdf"
         final_pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
         tasks_ready_for_print.append({'path': final_pdf_path, 'name': original_task_data['file_name'], 'pages': pages, 'copies': copies, 'is_color': is_color, 'is_duplex': is_duplex, 'prix': prix_tache, 'paper_size': options.get('papersize', '2'), 'page_mode': page_mode, 'start_page': start_page, 'end_page': end_page, 'task_id': task_id})
-
     if not tasks_ready_for_print: return jsonify({'success': False, 'error': 'Aucune tâche valide trouvée.'}), 400
     print_job_summary = {'tasks': tasks_ready_for_print, 'prix_total': total_price, 'client_name': history_tasks[tasks_ready_for_print[0]['task_id']]['client_name'], 'job_id': job_id}
     session['print_job'] = print_job_summary
@@ -246,54 +218,56 @@ def get_task_from_db(task_id):
         cursor = conn.execute("SELECT * FROM history WHERE task_id = ?", (task_id,));
         return cursor.fetchone()
 
+@app.route('/preview/<task_id>')
+def preview_file(task_id):
+    task_info = get_task_from_db(task_id)
+    if not task_info:
+        return "Tâche introuvable.", 404
+    secure_filename_val = task_info['secure_filename']
+    pdf_filename = f"{os.path.splitext(secure_filename_val)[0]}.pdf"
+    pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
+    if os.path.exists(pdf_path):
+        return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=False)
+    return "Le fichier de prévisualisation n'est pas encore prêt ou a été supprimé.", 404
+
 @app.route('/download/<task_id>')
 def download_file(task_id):
     if not session.get('is_admin'): return "Accès non autorisé", 403
+
+    # Par défaut, on affiche. Le téléchargement est forcé si 'dl=1' est dans l'URL.
+    force_download = request.args.get('dl') == '1'
+
     task_info = get_task_from_db(task_id)
     if not task_info: return "Tâche introuvable.", 404
 
     secure_filename_val = task_info['secure_filename']
     pdf_filename = f"{os.path.splitext(secure_filename_val)[0]}.pdf"
     pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
-    if os.path.exists(pdf_path):
-        return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=False)
 
+    # Priorité au PDF converti
+    if os.path.exists(pdf_path):
+        return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=force_download)
+
+    # Sinon, on prend le fichier original
     original_path = task_info.get('original_path')
     if original_path and os.path.exists(original_path):
         directory, filename = os.path.split(original_path)
-        return send_from_directory(directory, filename, as_attachment=True)
+        return send_from_directory(directory, filename, as_attachment=force_download)
 
     return "Fichier introuvable sur le serveur.", 404
 
 @app.route('/reprint', methods=['POST'])
 def reprint_task():
     if not session.get('is_admin'): return jsonify({'success': False, 'error': 'Non autorisé'}), 403
-
     data = request.get_json()
     task_id = data.get('task_id')
     if not task_id: return jsonify({'success': False, 'error': 'task_id manquant.'}), 400
-
     task_info = get_task_from_db(task_id)
     if not task_info: return jsonify({'success': False, 'error': f'Tâche {task_id} introuvable.'}), 404
-
     pdf_filename = f"{os.path.splitext(task_info['secure_filename'])[0]}.pdf"
     pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
     if not os.path.exists(pdf_path): return jsonify({'success': False, 'error': f'Fichier PDF {pdf_filename} introuvable.'}), 404
-
-    reprint_job = {
-        'tasks': [{
-            'path': pdf_path,
-            'name': task_info['file_name'],
-            'copies': data.get('copies', 1),
-            'pages': task_info['pages'],
-            'is_color': data.get('is_color', False),
-            'is_duplex': data.get('is_duplex', False),
-            'paper_size': task_info['paper_size'] or '2',
-            'page_mode': 'all',
-            'task_id': task_id
-        }]
-    }
-
+    reprint_job = {'tasks': [{'path': pdf_path, 'name': task_info['file_name'], 'copies': data.get('copies', 1), 'pages': task_info['pages'], 'is_color': data.get('is_color', False), 'is_duplex': data.get('is_duplex', False), 'paper_size': task_info['paper_size'] or '2', 'page_mode': 'all', 'task_id': task_id}]}
     reprint_process = Process(target=_run_print_job, args=(reprint_job,))
     reprint_process.start()
     return jsonify({'success': True})
@@ -301,50 +275,27 @@ def reprint_task():
 @app.route('/api/reprint_job', methods=['POST'])
 def reprint_job():
     if not session.get('is_admin'): return jsonify({'success': False, 'error': 'Non autorisé'}), 403
-
     data = request.get_json()
     job_id = data.get('job_id')
     options = data.get('options', {})
-
     if not job_id: return jsonify({'success': False, 'error': 'job_id manquant.'}), 400
-
     with get_db_connection() as conn:
         cursor = conn.execute("SELECT * FROM history WHERE job_id = ?", (job_id,))
         all_tasks_in_job = cursor.fetchall()
-
     if not all_tasks_in_job: return jsonify({'success': False, 'error': f'Job {job_id} introuvable.'}), 404
-
     tasks_for_reprint = []
     unprintable_statuses = ['ERREUR_CONVERSION', 'ERREUR_FICHIER_VIDE', 'ERREUR_LECTURE_FATALE']
-
     for task_info in all_tasks_in_job:
-        if task_info['status'] in unprintable_statuses:
-            continue
-
+        if task_info['status'] in unprintable_statuses: continue
         pdf_filename = f"{os.path.splitext(task_info['secure_filename'])[0]}.pdf"
         pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
-
         if os.path.exists(pdf_path):
-            tasks_for_reprint.append({
-                'path': pdf_path,
-                'name': task_info['file_name'],
-                'copies': options.get('copies', 1),
-                'pages': task_info['pages'],
-                'is_color': options.get('is_color', False),
-                'is_duplex': options.get('is_duplex', False),
-                'paper_size': task_info['paper_size'] or '2',
-                'page_mode': 'all',
-                'task_id': task_info['task_id']
-            })
-
-    if not tasks_for_reprint:
-        return jsonify({'success': False, 'error': 'Aucun fichier imprimable trouvé dans cette commande.'})
-
+            tasks_for_reprint.append({'path': pdf_path, 'name': task_info['file_name'], 'copies': options.get('copies', 1), 'pages': task_info['pages'], 'is_color': options.get('is_color', False), 'is_duplex': options.get('is_duplex', False), 'paper_size': task_info['paper_size'] or '2', 'page_mode': 'all', 'task_id': task_info['task_id']})
+    if not tasks_for_reprint: return jsonify({'success': False, 'error': 'Aucun fichier imprimable trouvé dans cette commande.'})
     reprint_job_data = {'tasks': tasks_for_reprint}
     reprint_process = Process(target=_run_print_job, args=(reprint_job_data,))
     reprint_process.start()
     return jsonify({'success': True})
-
 
 @app.route('/login', methods=['GET', 'POST'])
 def login():
@@ -360,18 +311,12 @@ def admin_data_api():
     with get_db_connection() as conn:
         cursor = conn.execute("SELECT * FROM history ORDER BY timestamp DESC");
         history = [dict(row) for row in cursor.fetchall()]
-
     grouped_commands = OrderedDict()
     for row in history:
         key = row.get('job_id')
         if not key: continue
         if key not in grouped_commands:
-            grouped_commands[key] = {
-                'job_id': key, 'timestamp': row['timestamp'], 'client_name': row['client_name'],
-                'total_price': 0.0, 'files': [], 'job_status': 'success',
-                'source': row.get('source', 'upload'), 'email_subject': row.get('email_subject')
-            }
-
+            grouped_commands[key] = {'job_id': key, 'timestamp': row['timestamp'], 'client_name': row['client_name'], 'total_price': 0.0, 'files': [], 'source': row.get('source', 'upload'), 'email_subject': row.get('email_subject')}
         grouped_commands[key]['files'].append(row)
         try:
             price = float(row.get('price') or 0.0)
@@ -379,13 +324,25 @@ def admin_data_api():
                 grouped_commands[key]['total_price'] += price
         except (ValueError, TypeError): pass
 
-        if 'ERREUR' in row.get('status', ''): grouped_commands[key]['job_status'] = 'error'
-        elif any(s in row.get('status', '') for s in ['EN_ATTENTE', 'EN_COURS', 'QUEUED', 'CONVERTING', 'COUNTING']):
-             if grouped_commands[key]['job_status'] != 'error': grouped_commands[key]['job_status'] = 'pending'
+    for job_id, command in grouped_commands.items():
+        statuses = [f['status'] for f in command['files']]
+        job_status = 'unknown'
+        if any('ERREUR' in s for s in statuses):
+            job_status = 'error'
+        elif all(s in (STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT']) for s in statuses):
+            job_status = 'completed'
+        elif any(s == STATUS['PRINTING'] for s in statuses):
+            job_status = 'printing'
+        elif any(s in (STATUS['QUEUED'], STATUS['CONVERTING'], STATUS['COUNTING']) for s in statuses):
+            job_status = 'pending'
+        elif all(s in (STATUS['READY'], STATUS['READY_NO_PAGE_COUNT']) for s in statuses):
+            job_status = 'ready'
+        else:
+            job_status = 'pending'
+        command['job_status'] = job_status
 
     upload_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'upload']
     email_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'email']
-
     with get_db_connection() as conn:
         valid_print_statuses = (STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT'])
         placeholders = ','.join('?' for _ in valid_print_statuses)
@@ -393,11 +350,7 @@ def admin_data_api():
         total_revenue = cursor.fetchone()[0] or 0.0
         cursor = conn.execute(f"SELECT SUM(pages * copies) FROM history WHERE status IN ({placeholders}) AND pages > 0", valid_print_statuses);
         total_pages_printed = cursor.fetchone()[0] or 0
-
-    return jsonify({
-        'upload_commands': upload_commands, 'email_commands': email_commands,
-        'total_revenue': f"{total_revenue:.2f}", 'total_pages': total_pages_printed
-    })
+    return jsonify({'upload_commands': upload_commands, 'email_commands': email_commands, 'total_revenue': f"{total_revenue:.2f}", 'total_pages': total_pages_printed})
 
 @app.route('/api/delete_task/<task_id>', methods=['POST'])
 def delete_task(task_id):
@@ -416,6 +369,52 @@ def delete_all_tasks():
     logging.warning("L'historique complet a été supprimé par un admin.");
     return jsonify({'success': True})
 
+@app.route('/api/browse_files')
+def browse_files():
+    if not session.get('is_admin'): return jsonify({'error': 'Non autorisé'}), 403
+
+    base_path = app.config['UPLOAD_FOLDER']
+    files_list = []
+
+    for root, dirs, files in os.walk(base_path):
+        for name in files:
+            file_path = os.path.join(root, name)
+            try:
+                stat = os.stat(file_path)
+                files_list.append({
+                    'name': name,
+                    'path': os.path.relpath(file_path, base_path),
+                    'size': stat.st_size,
+                    'modified': datetime.fromtimestamp(stat.st_mtime).strftime('%d/%m/%Y %H:%M')
+                })
+            except OSError:
+                continue
+
+    files_list.sort(key=lambda x: x['modified'], reverse=True)
+    return jsonify(files_list)
+
+@app.route('/api/download_raw_file')
+def download_raw_file():
+    if not session.get('is_admin'): return "Accès non autorisé", 403
+
+    file_rel_path = request.args.get('path')
+    if not file_rel_path: return "Chemin de fichier manquant.", 400
+
+    force_download = request.args.get('dl') == '1'
+
+    base_dir = os.path.abspath(app.config['UPLOAD_FOLDER'])
+    requested_path = os.path.abspath(os.path.join(base_dir, file_rel_path))
+
+    if not requested_path.startswith(base_dir):
+        logging.warning(f"Tentative de Directory Traversal bloquée: {file_rel_path}")
+        return "Chemin invalide.", 400
+
+    if os.path.exists(requested_path) and os.path.isfile(requested_path):
+        directory, filename = os.path.split(requested_path)
+        return send_from_directory(directory, filename, as_attachment=force_download)
+
+    return "Fichier introuvable.", 404
+
 @app.route('/logout')
 def logout():
     session.pop('is_admin', None); return redirect(url_for('login'))
@@ -429,18 +428,34 @@ def create_folders():
     for folder in [app.config['UPLOAD_FOLDER'], app.config['CONVERTED_FOLDER'], app.config['EMAIL_FOLDER']]:
         if not os.path.exists(folder): os.makedirs(folder); logging.info(f"Dossier créé : {folder}")
 
+def cleanup_old_files_periodically():
+    logging.info("Lancement du thread de nettoyage périodique...")
+    while True:
+        time.sleep(86400)
+        with app.app_context():
+            logging.info("Exécution du nettoyage des anciens fichiers...")
+            folders_to_clean = [app.config['UPLOAD_FOLDER'], app.config['CONVERTED_FOLDER'], app.config['EMAIL_FOLDER']]
+            retention_days = app.config.get('FILE_RETENTION_DAYS', 7)
+            for folder in folders_to_clean:
+                if not os.path.isdir(folder): continue
+                files = glob.glob(os.path.join(folder, '*'))
+                for file_path in files:
+                    if not os.path.isfile(file_path): continue
+                    try:
+                        file_mod_time = datetime.fromtimestamp(os.path.getmtime(file_path))
+                        if datetime.now() - file_mod_time > timedelta(days=retention_days):
+                            os.remove(file_path)
+                            logging.info(f"Fichier supprimé (car plus ancien que {retention_days} jours) : {file_path}")
+                    except Exception as e:
+                        logging.error(f"Erreur lors de la suppression de {file_path}: {e}")
+
 if __name__ == '__main__':
     if sys.platform.startswith('win') or sys.platform.startswith('darwin'):
         from multiprocessing import freeze_support
         freeze_support()
-
     create_folders()
-
-    email_thread = threading.Thread(
-        target=check_emails_periodically,
-        args=(app.config, app.app_context),
-        daemon=True
-    )
+    email_thread = threading.Thread(target=check_emails_periodically, args=(app.config, app.app_context), daemon=True)
     email_thread.start()
-
+    cleanup_thread = threading.Thread(target=cleanup_old_files_periodically, daemon=True)
+    cleanup_thread.start()
     app.run(host='0.0.0.0', port=5001)

@@ -34,7 +34,6 @@ class Config:
     EMAIL_IMAP_SERVER = 'imap.gmail.com'
     EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS') or 'latelier0000@gmail.com'
     EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD') or 'tiwt ipas vtad hbib'
-    # MODIFIÉ : Intervalle réduit à 10 secondes
     EMAIL_CHECK_INTERVAL = 10
     EMAIL_PROCESSED_MAILBOX = 'Traités' # Nom du dossier où déplacer les emails traités
 
@@ -43,9 +42,25 @@ class Config:
     CONVERTED_FOLDER = os.path.join(UPLOAD_FOLDER, 'converted')
     EMAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'emails') # Dossier pour les pièces jointes
     DATABASE_FILE = os.path.join(basedir, 'history.db')
+    # AMÉLIORATION : Ajout de la configuration pour le nettoyage
+    FILE_RETENTION_DAYS = 7 # Jours avant de supprimer les anciens fichiers
 
     # --- Dépendances externes ---
     LIBREOFFICE_PATH = os.environ.get('LIBREOFFICE_PATH') or find_libreoffice_path()
 
-    # --- URL de l'imprimante ---
+    # --- URL et Sélecteurs de l'imprimante ---
     URL_PDF_PRINT = f"http://{PRINTER_IP}/direct"
+    # AMÉLIORATION : Centralisation des sélecteurs Selenium
+    PRINTER_START_BUTTON_XPATH = "//input[contains(@value, \"Démarrer l'impression\")]"
+    PRINTER_COLOR_MODE_SELECTOR = "select[name='ColorMode']"
+    PRINTER_DUPLEX_CHECKBOX_ID = "DuplexMode"
+    PRINTER_DUPLEX_TYPE_SELECTOR = "select[name='DuplexType']"
+    PRINTER_MEDIA_SIZE_SELECTOR = "select[name='MediaSize']"
+    PRINTER_COPIES_INPUT_ID = "Copies"
+    PRINTER_PAGE_MODE_RANGE_ID = 'PageMode2'
+    PRINTER_PAGE_MODE_ALL_ID = 'PageMode1'
+    PRINTER_START_PAGE_INPUT_ID = 'StartPage'
+    PRINTER_END_PAGE_INPUT_ID = 'EndPage'
+    PRINTER_FILE_INPUT_NAME = "File"
+    PRINTER_SUCCESS_URL_CONTAINS = "pprint.cgi"
+    PRINTER_RETURN_BUTTON_XPATH = "//input[contains(@value, 'Retour à la page précédente')]"

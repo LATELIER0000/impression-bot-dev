@@ -1,4 +1,4 @@
---- CODE DU PROJET - GENERE LE 20/07/2025 A 23:59:27,21 --- 
+--- CODE DU PROJET - GENERE LE 21/07/2025 A 16:49:28,57 --- 
  
  
 ======================================================= 
@@ -37,9 +37,18 @@ class Config:
     PRIX_NOIR_BLANC = 0.20
     PRIX_COULEUR = 0.70
 
+    # --- Configuration de la boîte mail ---
+    EMAIL_IMAP_SERVER = 'imap.gmail.com'
+    EMAIL_ADDRESS = os.environ.get('EMAIL_ADDRESS') or 'latelier0000@gmail.com'
+    EMAIL_APP_PASSWORD = os.environ.get('EMAIL_APP_PASSWORD') or 'tiwt ipas vtad hbib'
+    # MODIFIÉ : Intervalle réduit à 10 secondes
+    EMAIL_CHECK_INTERVAL = 10
+    EMAIL_PROCESSED_MAILBOX = 'Traités' # Nom du dossier où déplacer les emails traités
+
     # --- Chemins des fichiers et dossiers ---
     UPLOAD_FOLDER = os.path.join(basedir, 'uploads')
     CONVERTED_FOLDER = os.path.join(UPLOAD_FOLDER, 'converted')
+    EMAIL_FOLDER = os.path.join(UPLOAD_FOLDER, 'emails') # Dossier pour les pièces jointes
     DATABASE_FILE = os.path.join(basedir, 'history.db')
 
     # --- Dépendances externes ---
@@ -58,17 +67,14 @@ FICHIER : print_server.py
 import os
 import time
 import sys
-import subprocess
 import shutil
 from datetime import datetime, timedelta
-import pathlib
 from collections import OrderedDict
 import threading
 import uuid
-import sqlite3
 import logging
 import traceback
-from multiprocessing import Process, Queue
+from multiprocessing import Process
 
 import click
 from selenium import webdriver
@@ -78,36 +84,39 @@ from webdriver_manager.chrome import ChromeDriverManager
 from selenium.webdriver.support.ui import Select
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
-from flask import Flask, render_template, request, redirect, url_for, session, jsonify, send_from_directory, g
-from PyPDF2 import PdfReader, errors as PyPDF2Errors
+from flask import Flask, render_template, request, redirect, url_for, session, jsonify, send_from_directory
 from werkzeug.utils import secure_filename
 
 from config import Config
+from core import (
+    db_insert_task, db_update_task, process_single_file_background,
+    get_db_connection as core_get_db_connection,
+    ALLOWED_EXTENSIONS, STATUS
+)
+from email_processor import check_emails_periodically
+
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 app = Flask(__name__)
 app.config.from_object(Config)
 
-STATUS = {
-    'UPLOADING': 'TELECHARGEMENT_EN_COURS', 'QUEUED': 'EN_ATTENTE_TRAITEMENT',
-    'CONVERTING': 'CONVERSION_EN_COURS', 'COUNTING': 'COMPTAGE_PAGES',
-    'ERROR_FILE_EMPTY': 'ERREUR_FICHIER_VIDE',
-    'ERROR_CONVERSION': 'ERREUR_CONVERSION',
-    'ERROR_PAGE_COUNT': 'ERREUR_COMPTAGE_PAGES',
-    'ERROR_FATAL_READ': 'ERREUR_LECTURE_FATALE',
-    'READY': 'PRET_POUR_CALCUL',
-    'READY_NO_PAGE_COUNT': 'PRET_SANS_COMPTAGE',
-    'PRINTING': 'IMPRESSION_EN_COURS',
-    'PRINT_SUCCESS': 'IMPRIME_AVEC_SUCCES',
-    'PRINT_SUCCESS_NO_COUNT': 'IMPRIME_SANS_COMPTAGE',
-    'PRINT_FAILED': 'ERREUR_IMPRESSION'
-}
-ALLOWED_EXTENSIONS = {'pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods'}
+@app.context_processor
+def inject_cache_buster():
+    return dict(cache_buster=int(time.time()))
 
+# --- NOUVEAU : Forcer la désactivation du cache ---
+@app.after_request
+def add_header(response):
+    """
+    Ajoute des en-têtes à chaque réponse pour empêcher la mise en cache.
+    """
+    response.headers['Cache-Control'] = 'no-cache, no-store, must-revalidate'
+    response.headers['Pragma'] = 'no-cache'
+    response.headers['Expires'] = '0'
+    return response
+# ------------------------------------------------
 
 def get_db_connection():
-    conn = sqlite3.connect(app.config['DATABASE_FILE'], timeout=10)
-    conn.row_factory = sqlite3.Row
-    return conn
+    return core_get_db_connection(app.config['DATABASE_FILE'])
 
 def init_db():
     with get_db_connection() as conn:
@@ -116,24 +125,6 @@ def init_db():
         conn.commit()
     logging.info("Base de données initialisée avec le schéma.")
 
-def db_update_task(task_id, data):
-    with get_db_connection() as conn:
-        fields = ', '.join([f'{key} = ?' for key in data.keys()])
-        values = list(data.values()) + [task_id]
-        query = f"UPDATE history SET {fields} WHERE task_id = ?"
-        conn.execute(query, tuple(values))
-        conn.commit()
-
-def db_insert_task(data):
-    with get_db_connection() as conn:
-        columns = ['job_id', 'task_id', 'timestamp', 'client_name', 'file_name', 'secure_filename', 'status', 'pages', 'copies', 'color', 'duplex', 'price', 'paper_size', 'page_mode', 'start_page', 'end_page']
-        query_cols = ', '.join(columns)
-        placeholders = ', '.join(['?'] * len(columns))
-        values = [data.get(col) for col in columns]
-        query = f"INSERT INTO history ({query_cols}) VALUES ({placeholders})"
-        conn.execute(query, tuple(values))
-        conn.commit()
-
 def allowed_file(filename):
     return '.' in filename and filename.rsplit('.', 1)[1].lower() in ALLOWED_EXTENSIONS
 
@@ -141,59 +132,6 @@ def generate_unique_filename(filename):
     timestamp = int(time.time())
     original_secure_name = secure_filename(filename)
     return f"{timestamp}_{uuid.uuid4().hex[:8]}_{original_secure_name}"
-
-def count_pages(filepath):
-    try:
-        with open(filepath, 'rb') as f:
-            reader = PdfReader(f)
-            if reader.is_encrypted:
-                logging.warning(f"Le fichier PDF {filepath} est chiffré.")
-            return len(reader.pages) if reader.pages else 0
-    except PyPDF2Errors.PdfReadError as e:
-        logging.error(f"Erreur de lecture PDF (PyPDF2) pour {filepath}: {e}")
-        return 0
-    except Exception as e:
-        logging.error(f"Erreur générique lors du comptage des pages pour {filepath}: {e}")
-        return 0
-
-def count_pages_worker(filepath, result_queue):
-    try:
-        page_count = count_pages(filepath)
-        result_queue.put(page_count)
-    except Exception as e:
-        logging.error(f"Erreur inattendue dans le worker count_pages pour {filepath}: {e}")
-        result_queue.put(-1)
-
-def convert_to_pdf(source_path, secure_filename):
-    pdf_filename = f"{os.path.splitext(secure_filename)[0]}.pdf"
-    pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
-    if source_path.lower().endswith('.pdf'):
-        shutil.copy(source_path, pdf_path)
-        return pdf_path
-    lo_command = app.config['LIBREOFFICE_PATH']
-    if not lo_command or not os.path.exists(lo_command):
-        logging.error(f"Chemin de LibreOffice non configuré ou invalide: {lo_command}")
-        return None
-    user_profile_path = os.path.join(os.getcwd(), 'lo_profile', str(time.time_ns()))
-    os.makedirs(user_profile_path, exist_ok=True)
-    user_profile_url = pathlib.Path(user_profile_path).as_uri()
-    try:
-        command = [lo_command, f'-env:UserInstallation={user_profile_url}', '--headless', '--convert-to', 'pdf:writer_pdf_Export', '--outdir', app.config['CONVERTED_FOLDER'], source_path]
-        subprocess.run(command, check=True, timeout=120)
-        timeout = 20
-        start_time = time.time()
-        while time.time() - start_time < timeout:
-            if os.path.exists(pdf_path) and os.path.getsize(pdf_path) > 0:
-                time.sleep(1)
-                return pdf_path
-            time.sleep(0.5)
-        logging.error(f"La conversion a réussi mais le fichier PDF n'a pas été trouvé à temps: {pdf_path}")
-        return None
-    except Exception as e:
-        logging.error(f"Erreur de conversion LibreOffice: {e}")
-        return None
-    finally:
-        shutil.rmtree(user_profile_path, ignore_errors=True)
 
 def _run_print_job(job):
     options = webdriver.ChromeOptions()
@@ -205,7 +143,7 @@ def _run_print_job(job):
         wait = WebDriverWait(driver, 60)
         for i, task in enumerate(job['tasks']):
             logging.info(f"Impression de la tâche {task['task_id']}...")
-            db_update_task(task['task_id'], {'status': STATUS['PRINTING']})
+            db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': STATUS['PRINTING']})
             driver.get(app.config['URL_PDF_PRINT'])
             wait.until(EC.presence_of_element_located((By.XPATH, "//input[contains(@value, \"Démarrer l'impression\")]")))
             Select(driver.find_element(By.CSS_SELECTOR, "select[name='ColorMode']")).select_by_value("0" if task['is_color'] else "1")
@@ -231,7 +169,7 @@ def _run_print_job(job):
             logging.info(f"Tâche {task['task_id']} envoyée à l'imprimante avec succès.")
 
             final_success_status = STATUS['PRINT_SUCCESS_NO_COUNT'] if task.get('pages', 0) == 0 else STATUS['PRINT_SUCCESS']
-            db_update_task(task['task_id'], {'status': final_success_status})
+            db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': final_success_status})
 
             if i < len(job['tasks']) - 1: driver.find_element(By.XPATH, return_button_xpath).click()
         return True
@@ -239,53 +177,10 @@ def _run_print_job(job):
         logging.error(f"ERREUR CRITIQUE DANS SELENIUM: {traceback.format_exc()}")
         if driver: driver.save_screenshot(f"selenium_error_{int(time.time())}.png")
         for task_to_fail in job['tasks']:
-            db_update_task(task_to_fail['task_id'], {'status': STATUS['PRINT_FAILED']})
+            db_update_task(app.config['DATABASE_FILE'], task_to_fail['task_id'], {'status': STATUS['PRINT_FAILED']})
         return False
     finally:
         if driver: driver.quit()
-
-def _process_single_file_background(task_info):
-    task_id = task_info['task_id']; original_filepath = task_info['original_path']; secure_filename = task_info['secure_filename']
-
-    db_update_task(task_id, {'status': STATUS['CONVERTING'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S")})
-    final_pdf_path = convert_to_pdf(original_filepath, secure_filename)
-    if not final_pdf_path:
-        logging.error(f"Échec de conversion pour {secure_filename}")
-        db_update_task(task_id, {'status': STATUS['ERROR_CONVERSION']}); return
-
-    db_update_task(task_id, {'status': STATUS['COUNTING']})
-
-    result_queue = Queue()
-    process = Process(target=count_pages_worker, args=(final_pdf_path, result_queue))
-    process.start()
-    process.join(timeout=15)
-
-    if process.is_alive():
-        process.terminate()
-        process.join()
-        logging.error(f"Le comptage des pages pour {final_pdf_path} a dépassé le timeout. Crash probable.")
-        db_update_task(task_id, {'status': STATUS['ERROR_FATAL_READ'], 'pages': 0})
-        return
-
-    if process.exitcode != 0:
-        logging.error(f"Le processus de comptage a crashé pour {final_pdf_path} (exit code: {process.exitcode}).")
-        db_update_task(task_id, {'status': STATUS['ERROR_FATAL_READ'], 'pages': 0})
-        return
-
-    try:
-        pages = result_queue.get_nowait()
-    except Exception:
-        logging.error(f"Impossible de récupérer le résultat du processus de comptage pour {final_pdf_path}.")
-        db_update_task(task_id, {'status': STATUS['ERROR_FATAL_READ'], 'pages': 0})
-        return
-
-    if pages > 0:
-        db_update_task(task_id, {'pages': pages, 'status': STATUS['READY']})
-        logging.info(f"Fichier {secure_filename} prêt pour calcul ({pages} pages).")
-    else:
-        logging.warning(f"Échec du comptage de pages pour {final_pdf_path}. Passage en mode 'Prêt sans comptage'.")
-        db_update_task(task_id, {'pages': 0, 'status': STATUS['READY_NO_PAGE_COUNT']})
-
 
 @app.route('/')
 def index():
@@ -293,9 +188,14 @@ def index():
 
 @app.route('/upload_and_process_file', methods=['POST'])
 def upload_and_process_file():
-    if 'file' not in request.files or not all(f in request.form for f in ['client_name', 'job_id', 'task_id']): return jsonify({'success': False, 'error': "Données manquantes."}), 400
+    if 'file' not in request.files or not all(f in request.form for f in ['client_name', 'job_id', 'task_id']):
+        return jsonify({'success': False, 'error': "Données manquantes."}), 400
+
     file = request.files['file']
-    if not allowed_file(file.filename): return jsonify({'success': False, 'error': "Type de fichier non autorisé."}), 400
+
+    if not allowed_file(file.filename):
+        logging.warning(f"Tentative d'upload d'un fichier non autorisé bloquée côté serveur : {file.filename}")
+        return jsonify({'success': False, 'error': "Type de fichier non autorisé."}), 400
 
     unique_filename = generate_unique_filename(file.filename)
     filepath = os.path.join(app.config['UPLOAD_FOLDER'], unique_filename)
@@ -305,23 +205,23 @@ def upload_and_process_file():
         file_size = os.path.getsize(filepath)
         if file_size == 0:
             logging.error(f"Fichier téléversé '{file.filename}' est vide (0 octet). Abandon.")
-            task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['ERROR_FILE_EMPTY']}
-            db_insert_task(task_data)
+            task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['ERROR_FILE_EMPTY'], 'source': 'upload', 'original_path': filepath}
+            db_insert_task(app.config['DATABASE_FILE'], task_data)
             os.remove(filepath)
             return jsonify({'success': True, 'task_id': task_data['task_id']})
     except OSError as e:
         logging.error(f"Impossible d'accéder au fichier ou de lire sa taille: {e}")
         return jsonify({'success': False, 'error': "Erreur serveur à la lecture du fichier."}), 500
 
-    task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['QUEUED']}
-    db_insert_task(task_data)
+    task_data = {'job_id': request.form['job_id'], 'task_id': request.form['task_id'], 'timestamp': datetime.now().strftime("%Y-%m-%d %H:%M:%S"), 'client_name': request.form['client_name'], 'file_name': file.filename, 'secure_filename': unique_filename, 'status': STATUS['QUEUED'], 'source': 'upload', 'original_path': filepath}
+    db_insert_task(app.config['DATABASE_FILE'], task_data)
 
     thread_args = {
         'task_id': task_data['task_id'],
         'original_path': filepath,
         'secure_filename': unique_filename
     }
-    thread = threading.Thread(target=_process_single_file_background, args=(thread_args,)); thread.start()
+    thread = threading.Thread(target=process_single_file_background, args=(thread_args, app.config)); thread.start()
 
     return jsonify({'success': True, 'task_id': task_data['task_id']})
 
@@ -342,7 +242,7 @@ def get_job_status(job_id):
                 if now - task_time > timedelta(seconds=timeout_seconds):
                     logging.warning(f"Tâche {task['task_id']} ({task['file_name']}) a dépassé le temps limite. Passage en erreur.")
                     error_status = STATUS['ERROR_CONVERSION']
-                    db_update_task(task['task_id'], {'status': error_status})
+                    db_update_task(app.config['DATABASE_FILE'], task['task_id'], {'status': error_status})
                     task['status'] = error_status
             except (ValueError, TypeError):
                 continue
@@ -396,7 +296,7 @@ def calculate_summary():
             page_mode = 'all'; start_page = None; end_page = None
 
         update_data = {'copies': copies, 'color': 'Couleur' if is_color else 'N&B', 'duplex': 'Recto-Verso' if is_duplex else 'Recto', 'price': f"{prix_tache:.2f}" if pages > 0 else "0.00", 'paper_size': options.get('papersize', '2'), 'page_mode': page_mode, 'start_page': start_page, 'end_page': end_page}
-        db_update_task(task_id, update_data)
+        db_update_task(app.config['DATABASE_FILE'], task_id, update_data)
 
         pdf_filename = f"{os.path.splitext(original_task_data['secure_filename'])[0]}.pdf"
         final_pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
@@ -426,12 +326,19 @@ def download_file(task_id):
     if not session.get('is_admin'): return "Accès non autorisé", 403
     task_info = get_task_from_db(task_id)
     if not task_info: return "Tâche introuvable.", 404
-    secure_filename = task_info['secure_filename']
-    pdf_filename = f"{os.path.splitext(secure_filename)[0]}.pdf"; pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
-    if os.path.exists(pdf_path): return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=False)
-    original_path = os.path.join(app.config['UPLOAD_FOLDER'], secure_filename)
-    if os.path.exists(original_path): return send_from_directory(app.config['UPLOAD_FOLDER'], secure_filename, as_attachment=True)
-    return "Fichier introuvable.", 404
+
+    secure_filename_val = task_info['secure_filename']
+    pdf_filename = f"{os.path.splitext(secure_filename_val)[0]}.pdf"
+    pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
+    if os.path.exists(pdf_path):
+        return send_from_directory(app.config['CONVERTED_FOLDER'], pdf_filename, as_attachment=False)
+
+    original_path = task_info.get('original_path')
+    if original_path and os.path.exists(original_path):
+        directory, filename = os.path.split(original_path)
+        return send_from_directory(directory, filename, as_attachment=True)
+
+    return "Fichier introuvable sur le serveur.", 404
 
 @app.route('/reprint', methods=['POST'])
 def reprint_task():
@@ -466,7 +373,6 @@ def reprint_task():
     reprint_process.start()
     return jsonify({'success': True})
 
-# NOUVELLE ROUTE POUR LA RÉIMPRESSION D'UN JOB ENTIER
 @app.route('/api/reprint_job', methods=['POST'])
 def reprint_job():
     if not session.get('is_admin'): return jsonify({'success': False, 'error': 'Non autorisé'}), 403
@@ -488,7 +394,7 @@ def reprint_job():
 
     for task_info in all_tasks_in_job:
         if task_info['status'] in unprintable_statuses:
-            continue # On ignore les fichiers non imprimables
+            continue
 
         pdf_filename = f"{os.path.splitext(task_info['secure_filename'])[0]}.pdf"
         pdf_path = os.path.join(app.config['CONVERTED_FOLDER'], pdf_filename)
@@ -509,8 +415,8 @@ def reprint_job():
     if not tasks_for_reprint:
         return jsonify({'success': False, 'error': 'Aucun fichier imprimable trouvé dans cette commande.'})
 
-    reprint_job = {'tasks': tasks_for_reprint}
-    reprint_process = Process(target=_run_print_job, args=(reprint_job,))
+    reprint_job_data = {'tasks': tasks_for_reprint}
+    reprint_process = Process(target=_run_print_job, args=(reprint_job_data,))
     reprint_process.start()
     return jsonify({'success': True})
 
@@ -534,9 +440,14 @@ def admin_data_api():
     for row in history:
         key = row.get('job_id')
         if not key: continue
-        if key not in grouped_commands: grouped_commands[key] = {'job_id': key, 'timestamp': row['timestamp'], 'client_name': row['client_name'], 'total_price': 0.0, 'files': [], 'job_status': 'success'}
-        grouped_commands[key]['files'].append(row)
+        if key not in grouped_commands:
+            grouped_commands[key] = {
+                'job_id': key, 'timestamp': row['timestamp'], 'client_name': row['client_name'],
+                'total_price': 0.0, 'files': [], 'job_status': 'success',
+                'source': row.get('source', 'upload'), 'email_subject': row.get('email_subject')
+            }
 
+        grouped_commands[key]['files'].append(row)
         try:
             price = float(row.get('price') or 0.0)
             if 'ERREUR' not in row.get('status', ''):
@@ -547,7 +458,8 @@ def admin_data_api():
         elif any(s in row.get('status', '') for s in ['EN_ATTENTE', 'EN_COURS', 'QUEUED', 'CONVERTING', 'COUNTING']):
              if grouped_commands[key]['job_status'] != 'error': grouped_commands[key]['job_status'] = 'pending'
 
-    final_commands = list(grouped_commands.values())
+    upload_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'upload']
+    email_commands = [cmd for cmd in grouped_commands.values() if cmd['source'] == 'email']
 
     with get_db_connection() as conn:
         valid_print_statuses = (STATUS['PRINT_SUCCESS'], STATUS['PRINT_SUCCESS_NO_COUNT'])
@@ -557,7 +469,10 @@ def admin_data_api():
         cursor = conn.execute(f"SELECT SUM(pages * copies) FROM history WHERE status IN ({placeholders}) AND pages > 0", valid_print_statuses);
         total_pages_printed = cursor.fetchone()[0] or 0
 
-    return jsonify({'commands': final_commands, 'total_revenue': f"{total_revenue:.2f}", 'total_pages': total_pages_printed})
+    return jsonify({
+        'upload_commands': upload_commands, 'email_commands': email_commands,
+        'total_revenue': f"{total_revenue:.2f}", 'total_pages': total_pages_printed
+    })
 
 @app.route('/api/delete_task/<task_id>', methods=['POST'])
 def delete_task(task_id):
@@ -586,7 +501,7 @@ def init_db_command():
     click.echo('Base de données initialisée.')
 
 def create_folders():
-    for folder in [app.config['UPLOAD_FOLDER'], app.config['CONVERTED_FOLDER']]:
+    for folder in [app.config['UPLOAD_FOLDER'], app.config['CONVERTED_FOLDER'], app.config['EMAIL_FOLDER']]:
         if not os.path.exists(folder): os.makedirs(folder); logging.info(f"Dossier créé : {folder}")
 
 if __name__ == '__main__':
@@ -595,6 +510,14 @@ if __name__ == '__main__':
         freeze_support()
 
     create_folders()
+
+    email_thread = threading.Thread(
+        target=check_emails_periodically,
+        args=(app.config, app.app_context),
+        daemon=True
+    )
+    email_thread.start()
+
     app.run(host='0.0.0.0', port=5001)
  
  
@@ -622,8 +545,12 @@ CREATE TABLE history (
   paper_size TEXT,
   page_mode TEXT,
   start_page TEXT,
-  end_page TEXT
-); 
+  end_page TEXT,
+  source TEXT DEFAULT 'upload', -- 'upload' ou 'email'
+  email_subject TEXT,
+  original_path TEXT -- Chemin vers le fichier d'origine avant conversion
+);
+ 
  
  
 ======================================================= 
@@ -671,14 +598,92 @@ document.addEventListener('DOMContentLoaded', function() {
     function initializeAdminPanel() {
         const refreshBtn = document.getElementById('refresh-btn');
         const deleteAllBtn = document.getElementById('delete-all-btn');
-        const commandsContainer = document.getElementById('commands-container');
+
+        // NOUVEAU: Sélection des deux conteneurs
+        const uploadCommandsContainer = document.getElementById('upload-commands-container');
+        const emailCommandsContainer = document.getElementById('email-commands-container');
+
         const reprintToastEl = document.getElementById('reprintToast');
         const reprintToast = reprintToastEl ? new bootstrap.Toast(reprintToastEl) : null;
         let currentPopover = null;
 
-        const fetchAdminData = () => {
-            const openCollapses = new Set(Array.from(commandsContainer.querySelectorAll('.collapse.show')).map(el => el.id));
+        // NOUVEAU : Fonction réutilisable pour générer le HTML d'une commande
+        const createCommandCardHTML = (command) => {
+            const collapseId = `command-details-${command.job_id}`;
+            const isEmail = command.source === 'email';
 
+            // On conserve les états ouverts pour le rafraîchissement
+            const openCollapses = new Set(Array.from(document.querySelectorAll('.collapse.show')).map(el => el.id));
+            const showClass = openCollapses.has(collapseId) ? 'show' : '';
+
+            const filesHTML = command.files.map(file => {
+                let statusBadge;
+                const status = file.status || 'INCONNU';
+                const unprintableStatuses = ['ERREUR_CONVERSION', 'ERREUR_FICHIER_VIDE', 'ERREUR_LECTURE_FATALE'];
+                const isPrintable = !unprintableStatuses.includes(status) && file.task_id;
+
+                if (status.includes('ERREUR')) statusBadge = `<span class="badge bg-danger">${status.replace(/_/g, ' ')}</span>`;
+                else if (status.includes('IMPRIME')) statusBadge = `<span class="badge bg-success">Imprimé</span>`;
+                else if (status.includes('IMPRESSION_EN_COURS')) statusBadge = `<span class="badge bg-info text-dark">Impression...</span>`;
+                else statusBadge = `<span class="badge bg-secondary">${status.replace(/_/g, ' ')}</span>`;
+
+                const priceDisplay = file.price ? `<small class="text-muted">(${(+file.price).toFixed(2)}€)</small>` : '';
+                const downloadLink = file.task_id ? `<a href="/download/${file.task_id}" target="_blank" class="text-decoration-none">${file.file_name}</a>` : file.file_name;
+
+                const pageDisplay = file.pages > 0 ? `<small class="text-muted ms-2">| ${file.pages} p.</small>` : '';
+
+                return `
+                    <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap">
+                        <div class="me-auto" style="word-break: break-all; padding-right: 1rem;">
+                            ${downloadLink} ${pageDisplay} ${priceDisplay}
+                            <div class="mt-1">${statusBadge}</div>
+                        </div>
+                        <div class="btn-group mt-1 mt-sm-0" role="group">
+                            <button class="btn btn-sm btn-outline-secondary reprint-btn" title="Réimprimer ce fichier"
+                                data-task-id="${file.task_id}" ${!isPrintable ? 'disabled' : ''}>
+                                <i class="bi bi-printer"></i>
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger delete-task-btn" title="Supprimer tâche"
+                                data-task-id="${file.task_id}" data-filename="${file.file_name}" ${!file.task_id ? 'disabled' : ''}>
+                                <i class="bi bi-x-lg"></i>
+                            </button>
+                        </div>
+                    </li>`;
+            }).join('');
+
+            const cardStatusClass = command.job_status === 'error' ? 'status-error' : (command.job_status === 'pending' ? 'status-pending' : '');
+
+            // Affichage du nom du client ou du sujet de l'email
+            const title = isEmail ? command.email_subject || 'Email sans sujet' : command.client_name;
+            const subtitle = isEmail ? command.client_name : command.timestamp;
+
+            return `
+                <div class="card shadow-sm mb-3 ${cardStatusClass}">
+                    <div class="card-body">
+                        <div class="d-flex justify-content-between align-items-center">
+                            <a href="#" class="text-decoration-none text-dark flex-grow-1" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
+                                <h5 class="card-title mb-0">${title}</h5>
+                                <small class="text-muted">${subtitle}</small>
+                            </a>
+                            <div class="text-end ms-3">
+                                <strong class="fs-5">${command.total_price.toFixed(2)} €</strong>
+                                <div class="small text-muted">${command.files.length} fichier(s) <i class="bi bi-chevron-down"></i></div>
+                            </div>
+                        </div>
+                        <div class="collapse ${showClass}" id="${collapseId}">
+                            <hr>
+                            <div class="d-flex justify-content-end mb-3">
+                                <button class="btn btn-sm btn-dark reprint-job-btn" data-job-id="${command.job_id}">
+                                    <i class="bi bi-printer-fill"></i> Réimprimer toute la commande
+                                </button>
+                            </div>
+                            <ul class="list-group list-group-flush">${filesHTML}</ul>
+                        </div>
+                    </div>
+                </div>`;
+        };
+
+        const fetchAdminData = () => {
             fetch('/api/admin_data')
                 .then(res => {
                     if (res.status === 401 || res.status === 403) window.location.reload();
@@ -691,83 +696,27 @@ document.addEventListener('DOMContentLoaded', function() {
                     document.getElementById('total-revenue-display').textContent = `${data.total_revenue} €`;
                     document.getElementById('total-pages-display').textContent = data.total_pages;
 
-                    commandsContainer.innerHTML = '';
-                    deleteAllBtn.disabled = !data.commands || data.commands.length === 0;
-                    if (!data.commands || data.commands.length === 0) {
-                        commandsContainer.innerHTML = '<p class="text-center text-muted">Aucune commande dans l\'historique.</p>';
-                        return;
+                    const allCommands = [...(data.upload_commands || []), ...(data.email_commands || [])];
+                    deleteAllBtn.disabled = allCommands.length === 0;
+
+                    // Affichage des commandes par Upload
+                    if (!data.upload_commands || data.upload_commands.length === 0) {
+                        uploadCommandsContainer.innerHTML = '<p class="text-center text-muted">Aucune commande par upload.</p>';
+                    } else {
+                        uploadCommandsContainer.innerHTML = data.upload_commands.map(createCommandCardHTML).join('');
                     }
 
-                    data.commands.forEach((command) => {
-                        const collapseId = `command-details-${command.job_id}`;
-                        const showClass = openCollapses.has(collapseId) ? 'show' : '';
-
-                        const filesHTML = command.files.map(file => {
-                            let statusBadge;
-                            const status = file.status || 'INCONNU';
-                            const unprintableStatuses = ['ERREUR_CONVERSION', 'ERREUR_FICHIER_VIDE', 'ERREUR_LECTURE_FATALE'];
-                            const isPrintable = !unprintableStatuses.includes(status) && file.task_id;
-
-                            if (status.includes('ERREUR')) statusBadge = `<span class="badge bg-danger">${status.replace(/_/g, ' ')}</span>`;
-                            else if (status.includes('IMPRIME')) statusBadge = `<span class="badge bg-success">Imprimé</span>`;
-                            else if (status.includes('IMPRESSION_EN_COURS')) statusBadge = `<span class="badge bg-info text-dark">Impression...</span>`;
-                            else statusBadge = `<span class="badge bg-secondary">${status.replace(/_/g, ' ')}</span>`;
-
-                            const priceDisplay = file.price ? `<small class="text-muted">(${(+file.price).toFixed(2)}€)</small>` : '';
-                            const downloadLink = file.task_id ? `<a href="/download/${file.task_id}" target="_blank" class="text-decoration-none">${file.file_name}</a>` : file.file_name;
-
-                            // NOUVEAU : Ajout du nombre de pages
-                            const pageDisplay = file.pages > 0 ? `<small class="text-muted ms-2">| ${file.pages} p.</small>` : '';
-
-                            return `
-                                <li class="list-group-item d-flex justify-content-between align-items-center flex-wrap">
-                                    <div class="me-auto" style="word-break: break-all; padding-right: 1rem;">
-                                        ${downloadLink} ${pageDisplay} ${priceDisplay}
-                                        <div class="mt-1">${statusBadge}</div>
-                                    </div>
-                                    <div class="btn-group mt-1 mt-sm-0" role="group">
-                                        <button class="btn btn-sm btn-outline-secondary reprint-btn" title="Réimprimer ce fichier"
-                                            data-task-id="${file.task_id}" ${!isPrintable ? 'disabled' : ''}>
-                                            <i class="bi bi-printer"></i>
-                                        </button>
-                                        <button class="btn btn-sm btn-outline-danger delete-task-btn" title="Supprimer tâche"
-                                            data-task-id="${file.task_id}" data-filename="${file.file_name}" ${!file.task_id ? 'disabled' : ''}>
-                                            <i class="bi bi-x-lg"></i>
-                                        </button>
-                                    </div>
-                                </li>`;
-                        }).join('');
-
-                        const cardStatusClass = command.job_status === 'error' ? 'status-error' : (command.job_status === 'pending' ? 'status-pending' : '');
-                        commandsContainer.innerHTML += `
-                            <div class="card shadow-sm mb-3 ${cardStatusClass}">
-                                <div class="card-body">
-                                    <div class="d-flex justify-content-between align-items-center">
-                                        <a href="#" class="text-decoration-none text-dark flex-grow-1" data-bs-toggle="collapse" data-bs-target="#${collapseId}">
-                                            <h5 class="card-title mb-0">${command.client_name}</h5>
-                                            <small class="text-muted">${command.timestamp}</small>
-                                        </a>
-                                        <div class="text-end ms-3">
-                                            <strong class="fs-5">${command.total_price.toFixed(2)} €</strong>
-                                            <div class="small text-muted">${command.files.length} fichier(s) <i class="bi bi-chevron-down"></i></div>
-                                        </div>
-                                    </div>
-                                    <div class="collapse ${showClass}" id="${collapseId}">
-                                        <hr>
-                                        <div class="d-flex justify-content-end mb-3">
-                                            <button class="btn btn-sm btn-dark reprint-job-btn" data-job-id="${command.job_id}">
-                                                <i class="bi bi-printer-fill"></i> Réimprimer toute la commande
-                                            </button>
-                                        </div>
-                                        <ul class="list-group list-group-flush">${filesHTML}</ul>
-                                    </div>
-                                </div>
-                            </div>`;
-                    });
+                    // Affichage des commandes par Email
+                    if (!data.email_commands || data.email_commands.length === 0) {
+                        emailCommandsContainer.innerHTML = '<p class="text-center text-muted">Aucune commande par email.</p>';
+                    } else {
+                        emailCommandsContainer.innerHTML = data.email_commands.map(createCommandCardHTML).join('');
+                    }
                 })
                 .catch(error => {
                     console.error('Erreur lors de la récupération des données admin:', error);
-                    commandsContainer.innerHTML = '<div class="alert alert-danger">Impossible de charger l\'historique. Le serveur est peut-être inaccessible.</div>';
+                    uploadCommandsContainer.innerHTML = '<div class="alert alert-danger">Impossible de charger l\'historique.</div>';
+                    emailCommandsContainer.innerHTML = '<div class="alert alert-danger">Le serveur est peut-être inaccessible.</div>';
                 });
         };
 
@@ -807,7 +756,8 @@ document.addEventListener('DOMContentLoaded', function() {
                 </div>`;
         }
 
-        commandsContainer.addEventListener('click', (event) => {
+        // On écoute les clics sur tout le panneau admin pour gérer les popovers
+        adminPanel.addEventListener('click', (event) => {
             const reprintBtn = event.target.closest('.reprint-btn');
             const reprintJobBtn = event.target.closest('.reprint-job-btn');
             const deleteTaskBtn = event.target.closest('.delete-task-btn');
@@ -969,6 +919,9 @@ document.addEventListener('DOMContentLoaded', function() {
     const PRIX_NB = parseFloat(document.getElementById('prix-nb-display').textContent.replace(',', '.'));
     const PRIX_C = parseFloat(document.getElementById('prix-c-display').textContent.replace(',', '.'));
 
+    // NOUVEAU : On définit les extensions autorisées ici aussi
+    const ALLOWED_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'txt'];
+
     let fileStore = [];
     let currentJobId = null;
     let pollingInterval = null;
@@ -1003,7 +956,6 @@ document.addEventListener('DOMContentLoaded', function() {
         if (!fileEntry || !taskRow) return;
 
         const pricePlaceholder = taskRow.querySelector('.task-price-placeholder');
-        // MODIFIÉ: S'assurer que serverData existe avant de chercher les pages
         const pages = fileEntry.serverData ? (fileEntry.serverData.pages || 0) : 0;
 
         if (pages === 0) {
@@ -1043,9 +995,17 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const newFiles = Array.from(fileInput.files);
-        fileInput.value = '';
+        fileInput.value = ''; // On vide l'input immédiatement
 
         newFiles.forEach(file => {
+            // --- MODIFICATION : Contrôle de l'extension ---
+            const extension = file.name.split('.').pop().toLowerCase();
+            if (!ALLOWED_EXTENSIONS.includes(extension)) {
+                showToast(`Le type de fichier "${file.name}" (.${extension}) n'est pas supporté.`, 'danger');
+                return; // On passe au fichier suivant sans rien faire
+            }
+            // ---------------------------------------------
+
             if (fileStore.some(f => f.file.name === file.name && f.file.size === file.size)) return;
             if (file.size === 0) {
                 showToast(`Le fichier "${file.name}" est vide et ne peut pas être envoyé.`, 'danger');
@@ -1058,7 +1018,7 @@ document.addEventListener('DOMContentLoaded', function() {
         });
 
         startProcessingQueue();
-        if (!pollingInterval) startPolling();
+        if (!pollingInterval && fileStore.length > 0) startPolling();
     });
 
     function addFileToListDOM(fileEntry, index) {
@@ -1113,7 +1073,6 @@ document.addEventListener('DOMContentLoaded', function() {
                     if (!data || !data.tasks) return;
                     data.tasks.forEach(taskData => {
                         const fileEntry = fileStore.find(f => f.id === taskData.task_id);
-                        // MODIFIÉ: On met à jour même si le statut n'a pas changé, pour forcer la ré-évaluation de l'UI.
                         if (fileEntry) {
                             fileEntry.serverStatus = taskData.status;
                             fileEntry.serverData = taskData;
@@ -1156,8 +1115,6 @@ document.addEventListener('DOMContentLoaded', function() {
 
         optionsContainer.classList.toggle('d-none', !isReady);
 
-        // CORRECTION: On appelle la fonction de calcul de prix à chaque mise à jour de statut.
-        // Si le fichier n'est pas prêt, la fonction mettra "--.-- €" ou "Prix à définir".
         calculateTaskPrice(taskId);
 
         const removeBtn = fileRow.querySelector('.remove-file-btn');
@@ -1390,7 +1347,8 @@ FICHIER : templates\index.html
     <div id="toast-container" class="toast-container position-fixed bottom-0 end-0 p-3"></div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="{{ url_for('static', filename='js/main.js') }}"></script>
+    <!-- MODIFIÉ : Ajout du paramètre cache_buster -->
+    <script src="{{ url_for('static', filename='js/main.js') }}?v={{ cache_buster }}"></script>
 </body>
 </html>
  
@@ -1472,8 +1430,17 @@ FICHIER : templates\admin.html
                     </div>
                 </div>
             </div>
-            <h2 class="mb-3">Historique des Commandes</h2>
-            <div id="commands-container"></div>
+
+            <div id="email-commands-section" class="mb-5">
+                <h2 class="mb-3"><i class="bi bi-envelope-at-fill text-secondary"></i> Commandes par Email</h2>
+                <div id="email-commands-container"></div>
+            </div>
+            <hr>
+            <div id="upload-commands-section" class="mt-5">
+                <h2 class="mb-3"><i class="bi bi-upload text-secondary"></i> Commandes par Upload</h2>
+                <div id="upload-commands-container"></div>
+            </div>
+
         </div>
     </div>
 
@@ -1487,7 +1454,8 @@ FICHIER : templates\admin.html
     </div>
 
     <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/js/bootstrap.bundle.min.js"></script>
-    <script src="{{ url_for('static', filename='js/admin.js') }}"></script>
+    <!-- MODIFIÉ : Ajout du paramètre cache_buster -->
+    <script src="{{ url_for('static', filename='js/admin.js') }}?v={{ cache_buster }}"></script>
     <script>const isUserLoggedIn = {{ is_logged_in|tojson }};</script>
 </body>
 </html>

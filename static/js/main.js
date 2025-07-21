@@ -11,7 +11,6 @@ document.addEventListener('DOMContentLoaded', function() {
     const PRIX_NB = parseFloat(document.getElementById('prix-nb-display').textContent.replace(',', '.'));
     const PRIX_C = parseFloat(document.getElementById('prix-c-display').textContent.replace(',', '.'));
 
-    // NOUVEAU : On définit les extensions autorisées ici aussi
     const ALLOWED_EXTENSIONS = ['pdf', 'png', 'jpg', 'jpeg', 'doc', 'docx', 'xls', 'xlsx', 'ppt', 'pptx', 'odt', 'ods', 'txt'];
 
     let fileStore = [];
@@ -87,16 +86,14 @@ document.addEventListener('DOMContentLoaded', function() {
         }
 
         const newFiles = Array.from(fileInput.files);
-        fileInput.value = ''; // On vide l'input immédiatement
+        fileInput.value = '';
 
         newFiles.forEach(file => {
-            // --- MODIFICATION : Contrôle de l'extension ---
             const extension = file.name.split('.').pop().toLowerCase();
             if (!ALLOWED_EXTENSIONS.includes(extension)) {
                 showToast(`Le type de fichier "${file.name}" (.${extension}) n'est pas supporté.`, 'danger');
-                return; // On passe au fichier suivant sans rien faire
+                return;
             }
-            // ---------------------------------------------
 
             if (fileStore.some(f => f.file.name === file.name && f.file.size === file.size)) return;
             if (file.size === 0) {
@@ -220,8 +217,13 @@ document.addEventListener('DOMContentLoaded', function() {
             case 'ERREUR_CONVERSION': statusHTML = `<span class="text-danger fw-bold">❌ Fichier non supporté</span>`; break;
             case 'ERREUR_FICHIER_VIDE': statusHTML = `<span class="text-danger fw-bold">❌ Fichier vide</span>`; break;
             case 'ERREUR_LECTURE_FATALE': statusHTML = `<span class="text-danger fw-bold">❌ Fichier corrompu</span>`; break;
-            case 'PRET_POUR_CALCUL': statusHTML = `<span class="text-success fw-bold">✅ Prêt</span>`; break;
-            case 'PRET_SANS_COMPTAGE': statusHTML = `<span class="text-warning fw-bold">⚠️ Prêt (comptage manuel)</span>`; break;
+            // AMÉLIORATION : Ajout du bouton "Aperçu"
+            case 'PRET_POUR_CALCUL':
+                statusHTML = `<span class="text-success fw-bold">✅ Prêt</span> <a href="/preview/${taskId}" target="_blank" class="btn btn-outline-secondary btn-sm ms-2 py-0"><i class="bi bi-eye"></i> Aperçu</a>`;
+                break;
+            case 'PRET_SANS_COMPTAGE':
+                statusHTML = `<span class="text-warning fw-bold">⚠️ Prêt (comptage manuel)</span> <a href="/preview/${taskId}" target="_blank" class="btn btn-outline-secondary btn-sm ms-2 py-0"><i class="bi bi-eye"></i> Aperçu</a>`;
+                break;
             default: statusHTML = `<span class="text-muted">En attente...</span>`;
         }
         statusDiv.innerHTML = statusHTML;
